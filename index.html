@@ -71,6 +71,38 @@
 </section>
 
 <section>
+  <h2>Thesis &amp; privacy boundary</h2>
+  <div class="frame">
+    <p style="margin:4px 0; font-size:1.05em">
+      <b>Preserve public ERC-4626 composability; hide user-level vault intent</b>
+      behind private notes and batched execution.
+    </p>
+  </div>
+  <div class="two-col" style="margin-top:16px">
+    <div class="frame">
+      <h3>Public, by design</h3>
+      <ul style="margin:6px 0; padding-left:1.4em">
+        <li>Aggregate flow between $\text{SPP}[A]$, $\text{PV}[V]$, and $V$</li>
+        <li>Each epoch's totals $A_{\text{in}}, S_{\text{out}}, S_{\text{in}}, A_{\text{out}}$</li>
+        <li>Public vault $V$ stays fully auditable</li>
+      </ul>
+    </div>
+    <div class="frame">
+      <h3>Private, by construction</h3>
+      <ul style="margin:6px 0; padding-left:1.4em">
+        <li>Which user entered or exited</li>
+        <li>Each user's exact per-request contribution</li>
+        <li>The note lineage linking deposits, holds, exits</li>
+      </ul>
+    </div>
+  </div>
+  <p class="gloss" style="margin-top:14px"><b>The boundary:</b> user activity private, vault-aggregate activity public. A public observer can audit the four epoch totals but cannot map them back to individual users.</p>
+  <aside class="notes">
+    State the destination before the problem. Researcher should leave this slide with the exact privacy claim in mind. Everything that follows is the "how"; this is the "what."
+  </aside>
+</section>
+
+<section>
   <h2>What an analyst reconstructs from a vanilla ERC-4626 deposit</h2>
   <table>
     <thead><tr><th>From a single public address, no special access</th><th>Result</th></tr></thead>
@@ -291,6 +323,16 @@
 
 <section>
   <h2>Notation cheat-sheet</h2>
+  <p style="margin:0 0 8px 0; font-size:0.74em; line-height:1.55; color: var(--muted)">
+    <span class="accent" style="font-weight:600">Symbols you'll hear most:</span>
+    &nbsp;<span class="key">$x$</span> my amount &nbsp;·&nbsp;
+    <span class="key">$A_{\text{in}}$</span> batch in &nbsp;·&nbsp;
+    <span class="key">$S_{\text{out}}$</span> batch shares out &nbsp;·&nbsp;
+    <span class="key">$rc_{\text{ent}}$</span> hidden claim ticket &nbsp;·&nbsp;
+    <span class="key">$\text{RCroot}$</span> all tickets in batch &nbsp;·&nbsp;
+    <span class="key">$nf_{\text{ent}}$</span> intent one-time marker &nbsp;·&nbsp;
+    <span class="key">$cnf_{\text{ent}}$</span> claim one-time marker
+  </p>
   <div class="two-col">
     <div>
       <h3>Per-note quantities</h3>
@@ -302,12 +344,21 @@
         <tr><td>$\rho_R$</td><td>per-receipt trapdoor (separate from $\rho$)</td></tr>
         <tr><td>$pk_d$</td><td>diversified user address (88-bit $d$)</td></tr>
       </table>
-      <h3 style="margin-top:14px">User keys</h3>
+      <h3 style="margin-top:12px">User keys</h3>
       <table>
         <tr><td>$sk_u, pk_u$</td><td>long-term user spending keypair</td></tr>
         <tr><td>$nk_{\text{nf}}$</td><td>nullifier-deriving key (user secret)</td></tr>
         <tr><td>$claimSk, claimPk$</td><td>per-receipt claim keypair</td></tr>
         <tr><td>$refundSk, refundPk$</td><td>per-intent refund keypair</td></tr>
+      </table>
+      <h3 style="margin-top:12px">Primitives</h3>
+      <table>
+        <tr><td>Curve</td><td>Baby Jubjub (over BN254)</td></tr>
+        <tr><td>$B$</td><td>Baby Jubjub generator (used in $[\,\cdot\,]\cdot B$)</td></tr>
+        <tr><td>Hash</td><td>Poseidon</td></tr>
+        <tr><td>Note commit</td><td>Pedersen, value-homomorphic</td></tr>
+        <tr><td>$\text{PRF}^X_K(\cdot)$</td><td>domain-separated PRF, key $K$, tag $X$</td></tr>
+        <tr><td>AEAD / KDF</td><td>ChaCha20-Poly1305 / HKDF</td></tr>
       </table>
     </div>
     <div>
@@ -320,22 +371,13 @@
         <tr><td>$\text{anchor}$</td><td>recent root of $T_{cm}$</td></tr>
         <tr><td>$\text{RCroot}$</td><td>Merkle root over the $m$ receipt commitments $rc_i$ in an executed batch</td></tr>
       </table>
-      <h3 style="margin-top:14px">Trees and sets (per pool)</h3>
+      <h3 style="margin-top:12px">Trees and sets (per pool)</h3>
       <table>
         <tr><td>$cm$</td><td>note commitment (Pedersen hash of opening)</td></tr>
         <tr><td>$T_{cm}[A], T_{cm}[V]$</td><td>commitment trees in $\text{SPP}[A]$ and $\text{PV}[V]$</td></tr>
         <tr><td>$nf$</td><td>spend nullifier; published on spend</td></tr>
         <tr><td>$\mathcal{N}[A], \mathcal{N}[V]$</td><td>nullifier sets, prevent double-spend</td></tr>
         <tr><td>$rc_{\text{ent}}, rc_{\text{xit}}$</td><td>receipt commitments (entry and exit)</td></tr>
-      </table>
-      <h3 style="margin-top:14px">Primitives</h3>
-      <table>
-        <tr><td>Curve</td><td>Baby Jubjub (over BN254)</td></tr>
-        <tr><td>$B$</td><td>Baby Jubjub generator (used in $[\,\cdot\,]\cdot B$)</td></tr>
-        <tr><td>Hash</td><td>Poseidon</td></tr>
-        <tr><td>Note commit</td><td>Pedersen, value-homomorphic</td></tr>
-        <tr><td>$\text{PRF}^X_K(\cdot)$</td><td>domain-separated PRF, key $K$, tag $X$</td></tr>
-        <tr><td>AEAD / KDF</td><td>ChaCha20-Poly1305 / HKDF</td></tr>
       </table>
     </div>
   </div>
@@ -375,7 +417,8 @@ sequenceDiagram
 <section class="center">
   <h1>Entry protocol</h1>
   <p class="muted">Three phases: <span class="accent">intent</span> → <span class="accent">execution</span> → <span class="accent">claim</span></p>
-  <p style="margin-top:24px"><span class="pill">running example</span></p>
+  <p class="muted" style="font-size:0.85em; margin-top:6px">Phase 1 establishes user privacy. Phase 2 aggregate correctness. Phase 3 per-user fairness.</p>
+  <p style="margin-top:18px"><span class="pill">running example</span></p>
   <div class="frame running" style="margin: 12px auto; display:inline-block; text-align:left">
 <b>Alice</b> holds an AssetNote of $X = 5$ WETH.<br>
 She wants to commit $x = 2$ WETH into vault $V$.<br>
@@ -632,7 +675,7 @@ PV[V].executeEntry(epochId, π_exec_ent, publicInputs):
     <div class="frame">
       <h3>EntryReceiptList</h3>
       <p style="font-size:0.85em; margin:4px 0">$(\text{epochId},\, [rc_{\text{ent},1}, \ldots, rc_{\text{ent},m}])$</p>
-      <ul style="font-size:0.78em; margin:4px 0">
+      <ul style="font-size:0.78em; margin:4px 0; padding-left:1.4em">
         <li>Full ordered receipt list, emitted in calldata.</li>
         <li>Each $rc_i$ is a hiding Poseidon commitment. Publishing the list reveals <b>nothing</b> about per-user amounts or claim secrets.</li>
         <li>Anyone can rebuild the Merkle tree and produce $\text{MerklePath}_{rc}$ for any leaf.</li>
@@ -826,23 +869,42 @@ s = \left\lfloor \frac{x \cdot S_{\text{out}}}{A_{\text{in}}} \right\rfloor = \l
 </section>
 
 <section>
-  <h2>Circuit-enforced vs contract-enforced</h2>
-  <table>
-    <thead><tr><th>Property</th><th>Circuit</th><th>Contract</th></tr></thead>
-    <tbody>
-      <tr><td>Old note exists under recent anchor</td><td>Yes</td><td>$\text{anchor} \in \text{validRoots}$</td></tr>
-      <tr><td>User owns old UserOwned note</td><td>Yes</td><td><span class="muted">n/a</span></td></tr>
-      <tr><td>$\sum x_i = A_{\text{in}}$, $\sum s_j = S_{\text{in}}$</td><td>Yes</td><td>Public-input check</td></tr>
-      <tr><td>$\text{RCroot}$ matches selected receipts</td><td><b>Yes</b> (binding)</td><td>List emitted in calldata</td></tr>
-      <tr><td>Caller of privileged $\text{SPP}[A]$ fns is registered $\text{PV}$</td><td><span class="muted">n/a</span></td><td>$\text{registeredPVs}[\text{assetId}]$</td></tr>
-      <tr><td>Receiver of $V.\text{deposit}$ is $\text{PV}[V]$</td><td><span class="muted">n/a</span></td><td>$\text{SPP}[A]$ resolves via VaultRegistry; caller has no parameter</td></tr>
-      <tr><td>Shares actually received</td><td><span class="muted">n/a</span></td><td>Pre/post ERC-20 balance</td></tr>
-      <tr><td>Receipt double-claim</td><td>Yes (C6)</td><td>$\mathcal{N}^{\text{claim}}$ membership</td></tr>
-      <tr><td><b class="warn">Metadata privacy from the aggregator</b></td><td><b class="warn">No</b></td><td><span class="muted">n/a</span></td></tr>
-      <tr><td><b class="warn">MEV privacy of public vault call</b></td><td><b class="warn">No</b></td><td><span class="muted">n/a</span></td></tr>
-    </tbody>
-  </table>
-  <p class="gloss" style="margin-top:8px">The two <span class="warn">No</span> rows are the residual trust assumptions. Neither is fixable by changing only the circuit set.</p>
+  <h2>Soundness summary</h2>
+  <p style="margin:0 0 12px 0; font-size:0.92em">Three buckets. The first two compose the protocol's correctness; the third is residual trust.</p>
+  <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px;">
+    <div class="frame">
+      <h3>Cryptographic <span class="muted" style="font-size:0.7em">(circuit)</span></h3>
+      <ul style="font-size:0.78em; padding-left:1.1em; margin:6px 0">
+        <li>Note ownership &amp; Merkle inclusion under a recent anchor</li>
+        <li>Spend-nullifier correctness; single-use enforced via $\mathcal{N}$</li>
+        <li>Aggregate conservation: $\sum x_i = A_{\text{in}}$, $\sum s_j = S_{\text{in}}$</li>
+        <li><b>$\text{RCroot}$ binds exactly to the consumed receipts</b> (constraint g)</li>
+        <li>Pro-rata allocation formula (C7)</li>
+        <li>Receipt double-claim prevented via $cnf$ (C6)</li>
+      </ul>
+    </div>
+    <div class="frame">
+      <h3>Operational <span class="muted" style="font-size:0.7em">(contract)</span></h3>
+      <ul style="font-size:0.78em; padding-left:1.1em; margin:6px 0">
+        <li>$\text{anchor} \in \text{validRoots}$ check</li>
+        <li>Privileged $\text{SPP}[A]$ caller is in $\text{registeredPVs}[\text{assetId}]$</li>
+        <li>Receivers of $V.\text{deposit} / V.\text{redeem}$ resolved by contract, not caller</li>
+        <li>Realized $S_{\text{out}}, A_{\text{out}}$ measured by pre/post ERC-20 balance</li>
+        <li>Reentrancy lock around the cross-contract execution path</li>
+      </ul>
+    </div>
+    <div class="frame" style="border-color: var(--warn)">
+      <h3 class="warn">Not solved in v1</h3>
+      <ul style="font-size:0.78em; padding-left:1.1em; margin:6px 0">
+        <li><b>Metadata privacy from the aggregator.</b> It sees $(x_i, \text{vaultId})$ for the intents it batches.</li>
+        <li><b>MEV privacy of the public vault call.</b> Aggregate execution flows through the public mempool by default.</li>
+      </ul>
+      <p class="gloss" style="margin-top:8px; font-size:0.82em">Neither is fixable by adding circuits. Threshold viewing-key committees and private orderflow are v2 directions.</p>
+    </div>
+  </div>
+  <aside class="notes">
+    Frame as: cryptographic guarantees the user trusts math for; operational guarantees the user trusts immutable contract code for; and the residual two boxes that need a non-circuit fix. Don't promise privacy you can't deliver.
+  </aside>
 </section>
 
 <!-- =====================================================================
