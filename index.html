@@ -1,0 +1,922 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Privacy Vault, Mechanics Deep Dive</title>
+<meta name="viewport" content="width=1280, initial-scale=1">
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+
+<style>
+  :root {
+    --accent: #ffd166;
+    --accent2: #06d6a0;
+    --warn: #ef476f;
+    --muted: #9aa0a6;
+    --rule: #2a2a2a;
+  }
+  .reveal { font-size: 24px; }
+  .reveal h1 { font-size: 1.7em; letter-spacing: -0.02em; }
+  .reveal h2 { font-size: 1.25em; letter-spacing: -0.01em; }
+  .reveal h3 { font-size: 1.0em; color: var(--accent); margin-bottom: 0.4em;}
+  .reveal section { text-align: left; }
+  .reveal section.center { text-align: center; }
+  .reveal pre { box-shadow: none; font-size: 0.7em; }
+  .reveal code { color: var(--accent); }
+  .reveal table { font-size: 0.78em; border-collapse: collapse; width:100%; }
+  .reveal table th, .reveal table td { padding: 4px 8px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  .reveal table th { color: var(--accent); text-align: left; font-weight: 600; }
+  .reveal .muted { color: var(--muted); }
+  .reveal .accent { color: var(--accent); }
+  .reveal .accent2 { color: var(--accent2); }
+  .reveal .warn { color: var(--warn); }
+  .reveal small { font-size: 0.7em; color: var(--muted); }
+  .reveal .footnote { position:absolute; bottom: 8px; left: 40px; right:40px; font-size: 0.55em; color: var(--muted); }
+  .reveal .gloss { color: var(--muted); font-style: italic; font-size: 0.92em; margin-top: 4px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .two-col-3-2 { display: grid; grid-template-columns: 3fr 2fr; gap: 28px; }
+  .stack > * + * { margin-top: 10px; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #222; color: var(--accent); font-size: 0.65em; margin-right: 6px; }
+  .key { color: var(--accent2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .reveal .mermaid { background: transparent; }
+  .reveal .mermaid svg { background: transparent !important; max-width: 100%; height: auto; }
+  .frame { border:1px solid var(--rule); border-radius: 8px; padding: 14px 16px; background: #0d0d0d; }
+  .frame + .frame { margin-top: 10px; }
+  .legend { font-size: 0.62em; color: var(--muted); }
+  .running { background: linear-gradient(180deg, rgba(255,209,102,0.08), transparent); padding: 8px 12px; border-radius: 4px; }
+  .reveal .slide-number { color: var(--muted); }
+  .ascii { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.7em; line-height: 1.35; white-space: pre; color: var(--accent2); }
+</style>
+</head>
+
+<body>
+<div class="reveal"><div class="slides">
+
+<!-- =====================================================================
+     SETUP
+     ===================================================================== -->
+
+<section class="center">
+  <h1>Privacy Vault</h1>
+  <h2 class="muted">A privacy layer over unmodified ERC-4626 vaults</h2>
+  <p style="margin-top:36px"><span class="pill">deep dive</span></p>
+  <p class="muted" style="margin-top:24px">Universal shielded pool $\text{SPP}[A]$ &nbsp;+&nbsp; per-vault private vault $\text{PV}[V]$<br>Running example throughout: <span class="accent">WETH → ERC-4626 vault $V$</span></p>
+  <aside class="notes">
+    20–25 min target. We will spend ~12-14 min on the entry protocol. The exit protocol is a 2-min mirror.
+    Start by stating the thesis: separating user intent from aggregate vault flow, while keeping V untouched.
+  </aside>
+</section>
+
+<section>
+  <h2>What an analyst reconstructs from a vanilla ERC-4626 deposit</h2>
+  <table>
+    <thead><tr><th>From a single public address, no special access</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>`approve` + `deposit(amount, recipient=0xA)`</td><td>Exact deposit amount &amp; timing, to the block</td></tr>
+      <tr><td>`mint shares` event</td><td>Permanent indexer-tagged position (Etherscan, Dune, Nansen)</td></tr>
+      <tr><td>`vault.balanceOf(0xA)` &times; public NAV</td><td>Continuous real-time USD value of the position</td></tr>
+      <tr><td>`redeem` + `transfer` to `0xA`</td><td>Exit timing, exit amount, exact yield = exit − entry</td></tr>
+      <tr><td>Cross-protocol joins on the same EOA</td><td>Lifetime DeFi profile: every position ever, joined</td></tr>
+    </tbody>
+  </table>
+  <p class="gloss" style="margin-top:14px">The position itself is the exposed surface. Privacy isn't an oversight in ERC-4626, it's not in scope for the standard. Today institutions either <span class="accent">don't deposit</span>, <span class="accent">hop wallets</span> (linkable by timing), or <span class="accent">use a permissioned shielded chain</span> (loses access to L1 vault ecosystem). None of those is "deposit into the vault you want, privately."</p>
+  <aside class="notes">
+    Set the stakes for institutional users. Skip if reviewer pushes "I get the problem", reclaim 1 min for the entry protocol.
+  </aside>
+</section>
+
+<!-- =====================================================================
+     ARCHITECTURE
+     ===================================================================== -->
+
+<section>
+  <h2>Two privacy layers, one architecture</h2>
+  <p>The system has two separate privacy domains, plus the unmodified public vault.</p>
+  <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-top: 18px">
+    <div class="frame">
+      <h3>$\text{SPP}[A]$, the asset pool</h3>
+      <p style="font-size:0.9em">One pool per <span class="accent">underlying asset</span> $A$. Holds asset custody. Provides the big anonymity set for private deposits in $A$.</p>
+    </div>
+    <div class="frame">
+      <h3>$\text{PV}[V]$, the share pool</h3>
+      <p style="font-size:0.9em">One per <span class="accent">public vault</span> $V$. Holds $V$'s ERC-4626 shares. <span class="accent2">Verifies all SNARKs.</span> Orchestrates every cross-contract call.</p>
+    </div>
+    <div class="frame">
+      <h3>$V$, the public vault</h3>
+      <p style="font-size:0.9em">Plain ERC-4626, untouched. Sees only aggregate calls from $\text{SPP}[A]$ and $\text{PV}[V]$. No notion of users.</p>
+    </div>
+  </div>
+  <p class="gloss" style="margin-top:18px">Anonymity-set-per-asset (not per-vault) is why $\text{SPP}[A]$ is separated from $\text{PV}[V]$. If each vault had its own asset pool, the anonymity set would fragment across vaults; with a universal $\text{SPP}[A]$, all WETH depositors share one set regardless of which vault they ultimately enter.</p>
+  <aside class="notes">
+    The diagram of the call graph is on the next slide. Use this slide to set up the three roles, then pivot to the diagram.
+  </aside>
+</section>
+
+<section>
+  <h2>Architecture: who calls whom</h2>
+  <div style="display:flex; justify-content:center">
+    <svg viewBox="0 0 920 460" style="width:100%; max-width:880px; height:auto" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrowEnd" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,-5 L10,0 L0,5" fill="#9aa0a6"/>
+        </marker>
+        <marker id="arrowAccent" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,-5 L10,0 L0,5" fill="#ffd166"/>
+        </marker>
+      </defs>
+
+      <!-- Top row: actors -->
+      <circle cx="140" cy="60" r="42" fill="#0d0d0d" stroke="#9aa0a6" stroke-width="2"/>
+      <text x="140" y="65" text-anchor="middle" fill="#fff" font-size="15" font-family="sans-serif">User</text>
+
+      <circle cx="460" cy="60" r="42" fill="#0d0d0d" stroke="#9aa0a6" stroke-width="2"/>
+      <text x="460" y="65" text-anchor="middle" fill="#fff" font-size="15" font-family="sans-serif">Relayer</text>
+
+      <circle cx="780" cy="60" r="50" fill="#0d0d0d" stroke="#9aa0a6" stroke-width="2"/>
+      <text x="780" y="65" text-anchor="middle" fill="#fff" font-size="15" font-family="sans-serif">Aggregator</text>
+
+      <!-- Middle row: contracts -->
+      <rect x="80" y="220" width="220" height="64" rx="10" fill="#0d0d0d" stroke="#ffd166" stroke-width="2"/>
+      <text x="190" y="258" text-anchor="middle" fill="#ffd166" font-size="20" font-family="sans-serif" font-weight="600">SPP[A]</text>
+
+      <rect x="620" y="220" width="220" height="64" rx="10" fill="#0d0d0d" stroke="#ffd166" stroke-width="2"/>
+      <text x="730" y="258" text-anchor="middle" fill="#ffd166" font-size="20" font-family="sans-serif" font-weight="600">PV[V]</text>
+
+      <!-- Bottom: vault -->
+      <rect x="380" y="370" width="160" height="60" rx="10" fill="#0d0d0d" stroke="#06d6a0" stroke-width="2"/>
+      <text x="460" y="406" text-anchor="middle" fill="#06d6a0" font-size="18" font-family="sans-serif" font-weight="600">V</text>
+
+      <!-- User -> Relayer (off-chain dotted) -->
+      <line x1="184" y1="60" x2="416" y2="60" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="6,5" marker-end="url(#arrowEnd)"/>
+      <text x="300" y="48" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif" font-style="italic">signed tx</text>
+
+      <!-- Relayer -> SPP (solid) -->
+      <line x1="430" y1="98" x2="240" y2="218" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
+
+      <!-- Relayer -> PV (solid) -->
+      <line x1="490" y1="98" x2="680" y2="218" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
+
+      <!-- Aggregator -> SPP (off-chain dotted, reads) -->
+      <path d="M 740,95 Q 480,150 250,220" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="6,5" fill="none" marker-end="url(#arrowEnd)"/>
+      <text x="500" y="148" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif" font-style="italic">reads events</text>
+
+      <!-- Aggregator -> PV (solid, executeEntry/Exit) -->
+      <line x1="780" y1="110" x2="760" y2="218" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
+      <text x="828" y="170" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">execute</text>
+
+      <!-- PV -> SPP (solid horizontal back) -->
+      <line x1="618" y1="252" x2="302" y2="252" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
+      <text x="460" y="244" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">deposit / exit</text>
+
+      <!-- SPP -> V (solid down) -->
+      <line x1="220" y1="286" x2="395" y2="370" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
+      <text x="270" y="350" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">V.deposit</text>
+
+      <!-- PV -> V (solid down) -->
+      <line x1="700" y1="286" x2="525" y2="370" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
+      <text x="650" y="350" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">V.redeem</text>
+    </svg>
+  </div>
+  <div style="display:grid; grid-template-columns: 1fr 1fr; gap:14px; margin-top:14px; font-size:0.88em">
+    <div class="frame">
+      <h3>Off-chain (dotted)</h3>
+      <ul style="margin:4px 0; padding-left:1.2em">
+        <li>User &rarr; Relayer: signed transaction</li>
+        <li>Aggregator &rarr; SPP[A], PV[V]: reads on-chain events to discover pending user requests</li>
+      </ul>
+    </div>
+    <div class="frame">
+      <h3>On-chain (solid)</h3>
+      <ul style="margin:4px 0; padding-left:1.2em">
+        <li>Relayer &rarr; SPP[A], PV[V]: user-side calls (spendAsset, claimEntry, ...)</li>
+        <li>Aggregator &rarr; PV[V]: executeEntry, executeExit</li>
+        <li>PV[V] &rarr; SPP[A]: depositToVault, registerExitInflow</li>
+        <li>SPP[A] &rarr; V: V.deposit&nbsp;&nbsp;&nbsp;PV[V] &rarr; V: V.redeem</li>
+      </ul>
+    </div>
+  </div>
+  <aside class="notes">
+    The encrypted intent plaintexts go on-chain as calldata of spendAsset / spendShare. Aggregators don't receive them out-of-band, they read events from SPP[A] (entry intents) and PV[V] (exit intents) and try to decrypt with their viewing key. That's why the dotted lines go from Aggregator to the contracts, not from User to Aggregator.
+  </aside>
+</section>
+
+<section>
+  <h2>The cast, what each party can see</h2>
+  <table>
+    <thead><tr><th>Entity</th><th>Role</th><th>Sees</th></tr></thead>
+    <tbody>
+      <tr><td><b>User</b></td><td>Holds private balances off-chain. Builds and signs transactions locally. No on-chain identity.</td><td>Their own private state.</td></tr>
+      <tr><td><b>Relayer</b></td><td>Submits user-built transactions and pays gas. Forwards opaque calldata.</td><td>Calldata bytes only.</td></tr>
+      <tr><td><b>Aggregator</b></td><td>A specialized relayer for batched vault calls. Reads pending requests, batches them, submits the aggregate execution.</td><td>The requests it batches: target vault and amount per request. <b>Cannot move funds.</b></td></tr>
+      <tr><td><b>$V$</b></td><td>Standard ERC-4626. Untouched by the protocol.</td><td>Aggregate calls only. No notion of users.</td></tr>
+    </tbody>
+  </table>
+  <p class="gloss" style="margin-top:14px"><b>Threat model.</b> Privacy is cryptographic against the public observer and the relayer. The aggregator is the residual trust assumption: it learns target vault and amount for the requests it batches, but it cannot fulfil them on a user's behalf. The user's spending authority stays with the user.</p>
+  <aside class="notes">
+    Drive home: aggregator can read and batch but cannot move funds. The crypto researcher should leave this slide knowing exactly which party is the residual trust boundary and why it's bounded (read-only, not spend).
+  </aside>
+</section>
+
+<section>
+  <h2>Building blocks: notes, commitments, trees, nullifiers</h2>
+  <p>The shared mechanics every pool in the system uses, before we get into anything entry-specific.</p>
+  <div class="two-col" style="margin-top:10px">
+    <div class="frame">
+      <h3>Notes and commitments</h3>
+      <p style="font-size:0.88em; margin:10px 0"><b>AssetNote</b>: private UTXO holding value $v$ of an underlying asset, payable to address $pk_d$.</p>
+      <p style="font-size:0.88em; margin:10px 0"><b>ShareNote</b>: private UTXO holding share count $s$ of vault $V$.</p>
+      <p style="font-size:0.88em; margin:10px 0"><b>Note commitment</b> $cm$: a Pedersen hash of the note's opening. Hides $v$ (or $s$) and $pk_d$. The opening stays in the user's wallet; only $cm$ goes on chain.</p>
+    </div>
+    <div class="frame">
+      <h3>Trees and anchors</h3>
+      <p style="font-size:0.88em; margin:10px 0"><b>Commitment tree</b> $T_{cm}$: an incremental Merkle tree of every commitment ever inserted in a pool. $\text{SPP}[A]$ has $T_{cm}[A]$, $\text{PV}[V]$ has $T_{cm}[V]$.</p>
+      <p style="font-size:0.88em; margin:10px 0"><b>Anchor</b>: a recent root of $T_{cm}$. Every spend proof picks an anchor and proves Merkle membership against it.</p>
+    </div>
+  </div>
+  <div class="frame" style="margin-top:14px">
+    <h3>Spend lifecycle and nullifiers</h3>
+    <div class="two-col" style="margin-top:8px">
+      <div>
+        <p style="font-size:0.88em; margin:8px 0"><b>Spend</b> = consume old notes, produce new ones. The user proves ownership, Merkle membership, and value conservation.</p>
+        <p style="font-size:0.88em; margin:8px 0"><b>Nullifier</b> $nf$: a hash derived from the note's secrets and the user's spending key. Published on spend; inserted into the pool's nullifier set $\mathcal{N}$.</p>
+      </div>
+      <div>
+        <p style="font-size:0.88em; margin:8px 0"><b>Double-spend prevention</b>: each pool refuses to insert any $nf$ already in $\mathcal{N}$. Once a nullifier is in, the corresponding note is unspendable forever.</p>
+        <p style="font-size:0.88em; margin:8px 0">$\mathcal{N}[A]$ lives in $\text{SPP}[A]$; $\mathcal{N}[V]$ lives in $\text{PV}[V]$.</p>
+      </div>
+    </div>
+  </div>
+  <aside class="notes">
+    This is the standard Zcash-style note + commitment-tree + nullifier scheme. Crypto reviewers know this pattern. Spend 30 seconds confirming familiarity, then move on. The next slide specialises this for intents and receipts.
+  </aside>
+</section>
+
+<section>
+  <h2>Building blocks: intent notes and receipts</h2>
+  <p>Two specialisations on top of the shared mechanics. Both are central to entry and exit.</p>
+  <div class="two-col" style="margin-top:8px">
+    <div class="frame">
+      <h3>The receipt</h3>
+      <p style="margin:4px 0">Opening (Alice's wallet, never on chain):</p>
+      <p style="text-align:center">$R_{\text{ent}} = (\text{assetId},\, \text{vaultId},\, x,\, claimPk,\, \text{expiry},\, \rho_R)$</p>
+      <p class="gloss" style="margin:2px 0">All parameters of Alice's request, plus secrets only she holds ($claimPk$ and the receipt trapdoor $\rho_R$).</p>
+      <p style="margin:8px 0 4px">Commitment (the on-chain handle):</p>
+      <p style="text-align:center">$rc_{\text{ent}} = \text{ReceiptCommit}_{\text{ent}}(R_{\text{ent}})$</p>
+      <p class="gloss" style="margin:2px 0">Hiding Poseidon commitment to $R_{\text{ent}}$. Reveals nothing about $x$ or $claimPk$. This is Alice's claim ticket.</p>
+    </div>
+    <div class="frame">
+      <h3>The entry intent note</h3>
+      <p style="margin:4px 0">A note (just like an AssetNote) with a restricted authorisation type:</p>
+      <p style="font-size:0.82em; text-align:center; margin:6px 0">
+        \[\begin{aligned}\text{EntryIntentNote} = (\,&\text{authType=EntrySink},\, \text{assetId},\, \text{vaultId},\, x, \\ &rc_{\text{ent}},\, \text{refundPk},\, \text{expiry},\, \rho,\, rcm\,)\end{aligned}\]
+      </p>
+      <p class="gloss" style="margin:2px 0">Carries $rc_{\text{ent}}$ inside its preimage, binding the on-chain intent to Alice's off-chain receipt.</p>
+      <p class="gloss" style="margin:2px 0">Its commitment $cm_{\text{intent}}$ goes into $T_{cm}[A]$. Bit-indistinguishable from any other commitment.</p>
+      <p class="gloss" style="margin:2px 0"><b>Cannot be spent by key.</b> Only the execution circuit (during a batch) or the refund circuit (after expiry) can consume it.</p>
+    </div>
+  </div>
+  <div class="frame" style="margin-top:10px">
+    <h3>Why two objects, not one?</h3>
+    <p class="gloss" style="margin:6px 0"><b>The intent note is the aggregator's input.</b> It signals "this user wants to put $x$ WETH into vault $V$". The aggregator picks it up alongside other intents, sums them, and submits one combined deposit into the public vault. The intent itself is consumed when the batch executes.</p>
+    <p class="gloss" style="margin:6px 0"><b>The receipt is the user's claim ticket.</b> Alice keeps it, then later uses it to claim her share of the vault position from $\text{PV}[V]$, in proportion to how much she contributed.</p>
+    <p class="gloss" style="margin:6px 0">Two objects, two roles: the intent feeds the aggregator's batched call; the receipt lets the user pull her share back out afterwards.</p>
+  </div>
+  <aside class="notes">
+    The bifurcation: intent note goes into the aggregate vault deposit (consumed there); receipt is the user's own private handle to claim shares back from the private vault later. Don't mention RCroot here, the audience hasn't seen it yet.
+  </aside>
+</section>
+
+<section>
+  <h2>Notation cheat-sheet</h2>
+  <div class="two-col">
+    <div>
+      <h3>Per-note quantities</h3>
+      <table>
+        <tr><td>$v$</td><td>asset note value (e.g. wei of WETH)</td></tr>
+        <tr><td>$s$</td><td>share count of a share note</td></tr>
+        <tr><td>$\rho$</td><td>per-note <span class="accent">trapdoor</span> (fresh random scalar)</td></tr>
+        <tr><td>$rcm$</td><td>per-note commitment randomness</td></tr>
+        <tr><td>$\rho_R$</td><td>per-receipt trapdoor (separate from $\rho$)</td></tr>
+        <tr><td>$pk_d$</td><td>diversified user address (88-bit $d$)</td></tr>
+      </table>
+      <h3 style="margin-top:14px">User keys</h3>
+      <table>
+        <tr><td>$sk_u, pk_u$</td><td>long-term user spending keypair</td></tr>
+        <tr><td>$nk_{\text{nf}}$</td><td>nullifier-deriving key (user secret)</td></tr>
+        <tr><td>$claimSk, claimPk$</td><td>per-receipt claim keypair</td></tr>
+        <tr><td>$refundSk, refundPk$</td><td>per-intent refund keypair</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Aggregates &amp; identifiers</h3>
+      <table>
+        <tr><td>$x$</td><td>one user's entry amount</td></tr>
+        <tr><td>$A_{\text{in}}, A_{\text{out}}$</td><td>aggregate WETH in/out for an epoch</td></tr>
+        <tr><td>$S_{\text{in}}, S_{\text{out}}$</td><td>aggregate shares in/out for an epoch</td></tr>
+        <tr><td>$m$</td><td>batch size (intents in one epoch)</td></tr>
+        <tr><td>$\text{anchor}$</td><td>recent root of $T_{cm}$</td></tr>
+        <tr><td>$\text{RCroot}$</td><td>Merkle root over the $m$ receipt commitments $rc_i$ in an executed batch</td></tr>
+      </table>
+      <h3 style="margin-top:14px">Trees and sets (per pool)</h3>
+      <table>
+        <tr><td>$cm$</td><td>note commitment (Pedersen hash of opening)</td></tr>
+        <tr><td>$T_{cm}[A], T_{cm}[V]$</td><td>commitment trees in $\text{SPP}[A]$ and $\text{PV}[V]$</td></tr>
+        <tr><td>$nf$</td><td>spend nullifier; published on spend</td></tr>
+        <tr><td>$\mathcal{N}[A], \mathcal{N}[V]$</td><td>nullifier sets, prevent double-spend</td></tr>
+        <tr><td>$rc_{\text{ent}}, rc_{\text{xit}}$</td><td>receipt commitments (entry and exit)</td></tr>
+      </table>
+      <h3 style="margin-top:14px">Primitives</h3>
+      <table>
+        <tr><td>Curve</td><td>Baby Jubjub (over BN254)</td></tr>
+        <tr><td>$B$</td><td>Baby Jubjub generator (used in $[\,\cdot\,]\cdot B$)</td></tr>
+        <tr><td>Hash</td><td>Poseidon</td></tr>
+        <tr><td>Note commit</td><td>Pedersen, value-homomorphic</td></tr>
+        <tr><td>$\text{PRF}^X_K(\cdot)$</td><td>domain-separated PRF, key $K$, tag $X$</td></tr>
+        <tr><td>AEAD / KDF</td><td>ChaCha20-Poly1305 / HKDF</td></tr>
+      </table>
+    </div>
+  </div>
+  <aside class="notes">
+    Tell reviewer: this slide stays in their head; we'll refer back. The two trapdoors ($\rho$ for the note, $\rho_R$ for the receipt) are deliberately separate so receipt-confidentiality survives even if the note opening leaks.
+  </aside>
+</section>
+
+<section>
+  <h2>Forward flow (entry)</h2>
+<pre class="mermaid" style="background:transparent; max-width:100%; margin: 0 auto">
+sequenceDiagram
+    autonumber
+    participant User
+    participant SPP
+    participant Aggregator
+    participant PV
+    participant V
+
+    User->>User: build R_ent locally, keep rc_ent in wallet
+    User->>SPP: spendAsset (consume WETH note, create entry intent)
+    Aggregator->>Aggregator: decrypt intents, batch m of them
+    Aggregator->>PV: executeEntry (batch SNARK)
+    PV->>SPP: depositToVault (consume intent nullifiers)
+    SPP->>V: V.deposit(A_in, receiver=PV)
+    V-->>PV: mint S_out aggregate shares
+    User->>PV: claimEntry (rc_ent, MerklePath_rc)
+    PV-->>User: fresh ShareNote at fresh diversified address
+</pre>
+  <p class="gloss">Reverse flow is symmetric: spendShare, then executeExit (V.redeem with receiver=$\text{SPP}[A]$), then claimExit producing a fresh AssetNote.</p>
+</section>
+
+<!-- =====================================================================
+     ENTRY PROTOCOL
+     ===================================================================== -->
+
+<section class="center">
+  <h1>Entry protocol</h1>
+  <p class="muted">Three phases: <span class="accent">intent</span> → <span class="accent">execution</span> → <span class="accent">claim</span></p>
+  <p style="margin-top:24px"><span class="pill">running example</span></p>
+  <div class="frame running" style="margin: 12px auto; display:inline-block; text-align:left">
+<b>Alice</b> holds an AssetNote of $X = 5$ WETH.<br>
+She wants to commit $x = 2$ WETH into vault $V$.<br>
+The batch has $m = 4$ intents totalling $A_{\text{in}} = 10$ WETH.<br>
+$V$ mints $S_{\text{out}} = 10$ shares to $\text{PV}[V]$.<br>
+Alice's pro-rata allocation: $s = \lfloor 2 \cdot 10 / 10 \rfloor = \mathbf{2}$ shares.
+  </div>
+  <aside class="notes">
+    Anchor the running example here. Every constraint slide will refer back to it.
+  </aside>
+</section>
+
+<section>
+  <h2>Intent: Alice's local construction</h2>
+  <div class="two-col-3-2">
+    <div>
+      <h3>1. Sample fresh secrets</h3>
+<pre><code>claimSk  ←$  𝔽    claimPk  = [claimSk]·B
+ρ_R      ←$  𝔽    (receipt trapdoor)
+ρ        ←$  𝔽    rcm     ←$  𝔽    (intent note)
+refundSk ←$  𝔽    refundPk = [refundSk]·B</code></pre>
+      <h3>2. Fill in the structures from the previous slide</h3>
+      <p style="font-size:0.92em">Compute $R_{\text{ent}}$ and $rc_{\text{ent}} = \text{ReceiptCommit}_{\text{ent}}(R_{\text{ent}})$. Build the EntryIntentNote with $rc_{\text{ent}}$, $\text{refundPk}$, $\text{expiry}$ embedded.</p>
+      <h3>3. Build a change note</h3>
+      <p style="font-size:0.92em">If $x &lt; X$, build a fresh $\text{AssetNote}(X-x, \ldots)$ at a new $pk_d$. Both new commitments will be inserted into $T_{cm}[A]$ in one transaction.</p>
+    </div>
+    <div class="stack">
+      <div class="frame running">
+        <b>Alice's example:</b><br>
+        $X = 5$, $x = 2$, change $= 3$<br>
+        Each random ($\rho_R, \rho, claimSk, \ldots$) is sampled <span class="accent">fresh</span> per intent.<br>
+        She'll need a change AssetNote of value 3 at a fresh $pk_d$.
+      </div>
+      <div class="frame">
+        <h3>Three private secrets, three roles</h3>
+        <ul style="font-size:0.86em">
+          <li><b>$\rho$</b>: keeps the <span class="accent">execution nullifier</span> $nf_{\text{ent}}$ unforgeable</li>
+          <li><b>$\rho_R$</b>: hides the <span class="accent">receipt opening</span> in $rc_{\text{ent}}$</li>
+          <li><b>$claimSk$</b>: gates who can later <span class="accent">claim</span> the pro-rata share</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <aside class="notes">
+    Stress: $rc_{\text{ent}}$ never appears in plaintext on chain at request time. It's published later, as part of the executed batch's RCroot. The aggregator sees $x$ and vaultId because they decrypt the intent, but they never see $R_{\text{ent}}$ or $claimSk$.
+  </aside>
+</section>
+
+<section>
+  <h2>The proof Alice generates</h2>
+  <div class="frame">
+    <p>$\pi_{\text{spend}}$ is a SNARK proving:</p>
+    <table>
+      <tr><td>1.</td><td>The input AssetNote really exists in $T_{cm}[A]$ at a recent anchor.</td><td class="gloss">Merkle membership of $cm_{\text{old}}$.</td></tr>
+      <tr><td>2.</td><td>Alice owns it.</td><td class="gloss">Knowledge of $sk_u$ matching the note's $pk_d$.</td></tr>
+      <tr><td>3.</td><td>The published spend nullifier $nf_{\text{old,asset}}$ is the canonical PRF output.</td><td class="gloss">$nf_{\text{old,asset}} = \text{PRF}^{\text{nf}}_{nk_{\text{nf}}}(\text{assetId}, \rho_{\text{old}})$</td></tr>
+      <tr><td>4.</td><td>The new intent commitment and change commitment are well-formed.</td><td class="gloss">Both Pedersen commitments computed from the witness opening.</td></tr>
+      <tr><td>5.</td><td>Value conservation: $x + (X - x) = X$.</td><td class="gloss">No wei minted out of thin air, no wei lost.</td></tr>
+    </table>
+  </div>
+  <p class="gloss" style="margin-top:10px">Public inputs: $(nf_{\text{old,asset}},\, cm_{\text{intent,ent}},\, cm_{\text{change}},\, \text{anchor})$. Witnesses: the AssetNote opening, $sk_u$, $\rho_{\text{old}}$, the new intent and change openings.</p>
+</section>
+
+<section>
+  <h2>On-chain: <code>SPP[A].spendAsset</code></h2>
+  <div class="frame">
+<pre><code>spendAsset(nf_old, cm_intent, cm_change?, π_spend, {(epk_j, C_j)}_{j=1..k}):
+  1. require verify(π_spend, public)
+  2. require nf_old ∉ N[A];   N[A].insert(nf_old)
+  3. T_cm[A].insert(cm_intent)
+  4. if cm_change present: T_cm[A].insert(cm_change)
+  5. emit IntentCreated(cm_intent, {(epk_j, C_j)})</code></pre>
+  </div>
+  <div class="two-col" style="margin-top:14px">
+    <div class="frame">
+      <h3>What just happened on-chain</h3>
+      <ul>
+        <li>Alice's old AssetNote is <span class="warn">irreversibly spent</span> ($nf_{\text{old}} \in \mathcal{N}[A]$).</li>
+        <li>An EntryIntentNote sits in $T_{cm}[A]$, indistinguishable bit-wise from any other commitment.</li>
+        <li>A change AssetNote sits beside it, also in $T_{cm}[A]$.</li>
+      </ul>
+    </div>
+    <div class="frame">
+      <h3>What aggregators do off-chain</h3>
+      <ul>
+        <li>Each aggregator $j$ watches `IntentCreated`, attempts to decrypt $C_j$.</li>
+        <li>On success: index the opening by $\text{vaultId}$.</li>
+        <li>Wait until $m$ intents accumulate for some vault, then go to execution.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Sidebar: why intent notes can't be spent by key</h2>
+  <div class="frame">
+    <p>Every commitment carries a hidden $\text{authType} \in \{\text{UserOwned},\, \text{EntrySink},\, \text{ExitSink}\}$ inside its preimage. Public commitments are <span class="accent2">bit-indistinguishable</span> across types.</p>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr><th>Mechanism</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td>Each pool registers a <b>fixed verifier per entry point</b> (`spendAsset` vs `executeEntry` vs `refundEntry`).</td><td>Prover cannot pick the verifier.</td></tr>
+      <tr><td>Spend circuit constrains <b>output</b> $\text{authType}$ to match its destination role.</td><td>UserOwned for asset/share outputs; EntrySink/ExitSink for intent outputs.</td></tr>
+      <tr><td>Execution circuit constrains <b>input</b> $\text{authType} = \text{EntrySink}$ / $\text{ExitSink}$.</td><td>UserOwned notes can't be fed to executor.</td></tr>
+    </tbody>
+  </table>
+  <p class="gloss" style="margin-top:10px">Together this rules out: (i) spending an intent note by key (no verifier accepts it as UserOwned input); (ii) feeding a UserOwned note to executor; (iii) forging an "intent-shaped" pre-image with $\text{authType}=\text{UserOwned}$ to bypass sink rules.</p>
+  <aside class="notes">
+    This is a small slide but a question magnet. authType is what makes "consumable only by execution or refund circuit" enforceable cryptographically rather than by ABI convention.
+  </aside>
+</section>
+
+<section>
+  <h2>Execution: assemble the batch</h2>
+  <div class="two-col">
+    <div>
+      <h3>Off-chain (relayer + aggregator)</h3>
+      <ol>
+        <li>Receive openings of $m$ intents for the same $\text{vaultId}$.</li>
+        <li>Compute $A_{\text{in}} = \sum_i x_i$.</li>
+        <li>Compute $\text{RCroot} = \text{MerkleRoot}([rc_{\text{ent},i}])$.</li>
+        <li>Pick $\text{anchor}$ ∈ $T_{cm}[A].\text{validRoots}$ (recent root).</li>
+        <li>Generate $\pi_{\text{exec,ent}}$.</li>
+      </ol>
+    </div>
+    <div class="frame running">
+      <b>Running batch:</b><br>
+      Alice: $x_1 = 2$ &nbsp; Bob: $x_2 = 3$<br>
+      Carol: $x_3 = 1$ &nbsp; Dan: $x_4 = 4$<br>
+      $m = 4,\quad A_{\text{in}} = 10$<br>
+      $\text{RCroot} = \text{MerkleRoot}(rc_1, rc_2, rc_3, rc_4)$
+    </div>
+  </div>
+  <div class="frame" style="margin-top:14px">
+    <h3>Public inputs vs witnesses</h3>
+    <p><span class="accent">Public:</span> $\big(\text{anchor},\, \text{assetId},\, \text{vaultId},\, A_{\text{in}},\, \{nf_{\text{ent},i}\}_{i=1..m},\, \text{RCroot},\, m\big)$</p>
+    <p><span class="accent2">Witness:</span> $\{\text{EntryIntentNote}_i,\, x_i,\, rc_{\text{ent},i},\, \rho_i,\, rcm_i,\, \text{MerklePath}_i\}_{i=1..m}$</p>
+  </div>
+  <p class="gloss" style="margin-top:8px">Subscript $i$ means "field $i$ supplied as witness." A bare $\text{vaultId}$ is the public input claimed for the whole batch.</p>
+</section>
+
+<section>
+  <h2>Circuit constraints (a) to (d)</h2>
+  <table>
+    <thead><tr><th>#</th><th>Constraint (notation)</th><th>What it ensures</th></tr></thead>
+    <tbody>
+    <tr>
+      <td><b>(a)</b></td>
+      <td style="font-size:0.78em">$\forall i:\ cm_{\text{intent},i} = \text{NoteCommit}(\text{"entry-intent"} \| \text{assetId} \| \text{vaultId} \| x_i \| rc_{\text{ent},i} \| \ldots \| \rho_i \| rcm_i)$</td>
+      <td class="gloss">Re-committing the witness opening reproduces the on-chain commitment. <b>Binds</b> $x_i$, $rc_{\text{ent},i}$, $\rho_i$ to the leaf.</td>
+    </tr>
+    <tr>
+      <td><b>(b)</b></td>
+      <td>$\forall i:\ cm_{\text{intent},i} \in \text{Tree}(\text{anchor})$ via $\text{MerklePath}_i$</td>
+      <td class="gloss">Each consumed leaf <b>actually exists</b> in $T_{cm}[A]$. Prevents fabricating intents.</td>
+    </tr>
+    <tr>
+      <td><b>(c)</b></td>
+      <td style="font-size:0.85em">$\forall i:\ \text{authType}_i = \text{EntrySink}\ \land\ \text{assetId}_i = \text{assetId}\ \land\ \text{vaultId}_i = \text{vaultId}$</td>
+      <td class="gloss">Each leaf <b>is</b> an entry intent (not an asset spend), and is <b>targeted at this asset and this vault</b>. Prevents cross-asset / cross-vault execution.</td>
+    </tr>
+    <tr>
+      <td><b>(d)</b></td>
+      <td>$\forall i:\ nf_{\text{ent},i} = H^{\text{nf,ent}}(\text{vaultId},\, \text{assetId},\, \rho_i)$</td>
+      <td class="gloss">Published nullifier matches the <b>canonical hash</b>. Otherwise relayer could publish arbitrary nullifiers,colliding with future legit intents or skipping consumed ones.</td>
+    </tr>
+    </tbody>
+  </table>
+  <p class="gloss" style="margin-top:10px"><b>Why an <i>unkeyed</i> hash for $nf_{\text{ent}}$?</b> Intent notes have no spending key,the aggregator must produce $nf_{\text{ent}}$ on the user's behalf. Unforgeability comes from $\rho_i$'s confidentiality, not from a key.</p>
+</section>
+
+<section>
+  <h2>Circuit constraints (e) to (g) <span class="muted">: soundness core</span></h2>
+  <table>
+    <thead><tr><th>#</th><th>Constraint</th><th>What it ensures</th></tr></thead>
+    <tbody>
+    <tr>
+      <td><b>(e)</b></td>
+      <td>$\forall i:\ \text{currentEpoch} \le \text{expiry}_i$</td>
+      <td class="gloss">Each intent is <b>still within validity window</b>. After expiry, the refund path is the only legal consumer of the same nullifier.</td>
+    </tr>
+    <tr>
+      <td><b>(f)</b></td>
+      <td>$A_{\text{in}} = \sum_{i=1}^{m} x_i$</td>
+      <td class="gloss">The publicly claimed aggregate equals the <b>actual sum</b>. Relayer cannot inflate or misreport the deposit total.</td>
+    </tr>
+    <tr>
+      <td><b>(g)</b></td>
+      <td>$\text{RCroot} = \text{MerkleRoot}(rc_{\text{ent},1}, \ldots, rc_{\text{ent},m})$</td>
+      <td class="gloss"><b>Critical clause.</b> Receipt root is bound exactly to the receipts inside the consumed intents: no extras, no omissions, no duplicates.</td>
+    </tr>
+    </tbody>
+  </table>
+  <div class="frame" style="margin-top:14px">
+    <h3>Why (g) is the soundness clause for receipts</h3>
+    <p>Suppose a malicious relayer wants to <span class="warn">omit Alice's receipt</span>, <span class="warn">duplicate Bob's</span>, or <span class="warn">substitute one receipt for another</span> in $\text{RCroot}$.</p>
+    <ul>
+      <li>Substituting a different $rc$ breaks <b>(a)</b>: the substituted $rc$ wouldn't reproduce the intent's $cm$.</li>
+      <li>Including an $rc$ not from a consumed intent breaks <b>(b)</b>: that intent isn't in the tree.</li>
+      <li>Omitting Alice's $rc$ breaks <b>(g)</b>: the root won't equal what the circuit computes.</li>
+    </ul>
+    <p>Without (g), the entire claim system is unsound,Alice could be excluded from her own batch's RCroot.</p>
+  </div>
+</section>
+
+<section>
+  <h2>On-chain execution</h2>
+  <div class="frame">
+<pre><code>// Under PV[V]'s reentrancy lock,V hooks cannot re-enter
+PV[V].executeEntry(epochId, π_exec_ent, publicInputs):
+  1. require publicInputs.currentEpoch == on-chain time source
+  2. require verify(π_exec_ent, publicInputs)
+  3. pre  = IERC20(V).balanceOf(address(this))      // share balance
+  4. SPP[A].depositToVault(vaultId, A_in, {nf_ent_i}, anchor)
+       └─ require msg.sender == registeredPVs[assetId]
+       └─ require assetId == this.assetId
+       └─ require anchor ∈ T_cm[A].validRoots
+       └─ for each nf: require ∉ N[A]; insert
+       └─ WETH.approve(V, A_in)
+       └─ V.deposit(A_in, receiver = PV[V])
+       └─ WETH.approve(V, 0)                        // residual reset
+  5. post = IERC20(V).balanceOf(address(this))
+  6. S_out = post − pre;  require S_out > 0
+  7. EntryEpoch[epochId] = (vaultId, assetId, A_in, S_out, RCroot, m)
+  8. emit EntryEpochExecuted(...) and EntryReceiptList(epochId, [rc_1..rc_m])</code></pre>
+  </div>
+  <div class="two-col" style="margin-top:8px">
+    <div class="frame running">
+      <b>Running example:</b><br>
+      $A_{\text{in}} = 10$ WETH → $V$<br>
+      $V$ mints $S_{\text{out}} = 10$ shares → $\text{PV}[V]$<br>
+      Stored: $\text{EntryEpoch}[E] = (V, \text{WETH}, 10, 10, \text{RCroot}, 4)$
+    </div>
+    <div class="frame">
+      <h3>Why pre/post balance, not return value?</h3>
+      <p class="gloss">$V$ is untrusted for privacy and economically risky. The authoritative $S_{\text{out}}$ is what $\text{PV}[V]$ <i>actually owns</i> after the call, not what $V$ claims to have minted.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>The two events users index on</h2>
+  <p style="margin:4px 0">Step 8 emits two events. Together they let any user claim without trusting an off-chain party.</p>
+  <div class="two-col" style="margin-top:8px">
+    <div class="frame">
+      <h3>EntryEpochExecuted</h3>
+      <p style="font-size:0.85em; margin:4px 0">$(\text{epochId},\, \text{vaultId},\, A_{\text{in}},\, S_{\text{out}},\, \text{RCroot},\, m)$</p>
+      <table style="font-size:0.72em">
+        <tr><td>$A_{\text{in}}, S_{\text{out}}$</td><td class="gloss">divisor and dividend of every user's pro-rata allocation</td></tr>
+        <tr><td>$\text{RCroot}$</td><td class="gloss">the receipt-list root every claim proof binds against</td></tr>
+        <tr><td>$\text{epochId}, \text{vaultId}, m$</td><td class="gloss">identifiers and batch size</td></tr>
+      </table>
+    </div>
+    <div class="frame">
+      <h3>EntryReceiptList</h3>
+      <p style="font-size:0.85em; margin:4px 0">$(\text{epochId},\, [rc_{\text{ent},1}, \ldots, rc_{\text{ent},m}])$</p>
+      <ul style="font-size:0.78em; margin:4px 0">
+        <li>Full ordered receipt list, emitted in calldata.</li>
+        <li>Each $rc_i$ is a hiding Poseidon commitment. Publishing the list reveals <b>nothing</b> about per-user amounts or claim secrets.</li>
+        <li>Anyone can rebuild the Merkle tree and produce $\text{MerklePath}_{rc}$ for any leaf.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="frame" style="margin-top:10px">
+    <h3>Why both events must be on-chain</h3>
+    <p class="gloss" style="margin:2px 0">Without <b>EntryEpochExecuted</b>, the public values $A_{\text{in}}, S_{\text{out}}, \text{RCroot}$ aren't available to bind a claim proof to.</p>
+    <p class="gloss" style="margin:2px 0">Without <b>EntryReceiptList</b>, Alice would need a trusted index from the relayer to find her position. A malicious relayer could withhold her index and her receipt would sit unclaimable in $\text{RCroot}$.</p>
+    <p class="gloss" style="margin:2px 0">With both on-chain, the data is permanent and every user has a self-contained path from receipt to claim.</p>
+  </div>
+  <aside class="notes">
+    Tie back to constraint (g): (g) binds RCroot to exactly these receipts; this slide adds that the list itself is also on-chain, so the binding is publicly checkable. The two events together give every user a self-contained claim.
+  </aside>
+</section>
+
+<section>
+  <h2>Claim: Alice mints her ShareNote</h2>
+  <div class="two-col">
+    <div>
+      <h3>Discovery (off-chain)</h3>
+      <ol>
+        <li>Watch `EntryEpochExecuted(epochId, vaultId, A_in, S_out, RCroot, m)`.</li>
+        <li>Read corresponding `EntryReceiptList(epochId, rc_list)`.</li>
+        <li>Compute $rc_{\text{ent}}$ from her stored $R_{\text{ent}}$.</li>
+        <li>Find index $i$ with $\text{rc\_list}[i] = rc_{\text{ent}}$.</li>
+        <li>Build $\text{MerklePath}_{rc}$ from leaf $i$ to $\text{RCroot}$.</li>
+      </ol>
+      <h3>Fresh material for output</h3>
+      <ul>
+        <li>$\rho_s, rcm_s \xleftarrow{\$} \mathbb{F}$</li>
+        <li>fresh diversifier $d \xleftarrow{\$} \{0,1\}^{88}$</li>
+        <li>derive a fresh diversified address $pk_d^{\text{user}}$ from her keys and $d$</li>
+      </ul>
+    </div>
+    <div class="frame running">
+      <b>Alice's pro-rata:</b>
+\[
+s = \left\lfloor \frac{x \cdot S_{\text{out}}}{A_{\text{in}}} \right\rfloor = \left\lfloor \frac{2 \cdot 10}{10} \right\rfloor = 2
+\]
+      <p>Claim nullifier (single-use):</p>
+      $cnf_{\text{ent}} = \text{PRF}^{\text{claim}}_{claimSk}(\text{"entry"}, E, rc_{\text{ent}})$
+      <p class="gloss">$claimSk$ is held only by Alice. The $cnf$ binds her single claim to (epoch, receipt). Prevents double-claim of the same receipt.</p>
+      <p>New ShareNote:</p>
+      $cm_{\text{share,out}} = \text{NoteCommit}(\text{"share"} \| \text{vaultId} \| s \| pk_d^{\text{user}} \| \rho_s \| rcm_s)$
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Claim circuit constraints C1 to C4</h2>
+  <table>
+    <thead><tr><th>#</th><th>Constraint</th><th>What it ensures</th></tr></thead>
+    <tbody>
+    <tr>
+      <td><b>C1</b></td>
+      <td>$rc_{\text{ent}} = \text{ReceiptCommit}_{\text{ent}}(R_{\text{ent}})$</td>
+      <td class="gloss">The witness opening Alice supplies <b>really opens to</b> the receipt commitment the proof binds to.</td>
+    </tr>
+    <tr>
+      <td><b>C2</b></td>
+      <td>$rc_{\text{ent}} \in \text{RCroot}$ via $\text{MerklePath}_{rc}$</td>
+      <td class="gloss">$rc_{\text{ent}}$ <b>was one of the $m$ receipts</b> in this executed epoch,the receipt list authority chain.</td>
+    </tr>
+    <tr>
+      <td><b>C3</b></td>
+      <td>$R_{\text{ent}}.\text{vaultId} = \text{vaultId}$</td>
+      <td class="gloss">The receipt's vault matches <b>this epoch's</b> vault. Prevents claiming Vault-X's epoch with a Vault-Y receipt.</td>
+    </tr>
+    <tr>
+      <td><b>C4</b></td>
+      <td>$R_{\text{ent}}.\text{expiry} \ge \text{epochId}$</td>
+      <td class="gloss">Receipt was still valid at the time of execution (sanity check; mirrors execution constraint (e) on the claim side).</td>
+    </tr>
+    </tbody>
+  </table>
+  <p class="gloss" style="margin-top:14px">C1+C2 together is the <b>chain of authority</b>: opening matches commitment, commitment is in the executed epoch's RCroot. Everything else hangs off this.</p>
+</section>
+
+<section>
+  <h2>Claim circuit constraints C5 to C8</h2>
+  <table>
+    <thead><tr><th>#</th><th>Constraint</th><th>What it ensures</th></tr></thead>
+    <tbody>
+    <tr>
+      <td><b>C5</b></td>
+      <td>$claimPk = [claimSk]\cdot B$</td>
+      <td class="gloss">Alice <b>knows the claim secret</b> committed in the receipt. Anyone who saw $rc_{\text{ent}}$ but not $claimSk$ cannot forge the claim.</td>
+    </tr>
+    <tr>
+      <td><b>C6</b></td>
+      <td>$cnf_{\text{ent}} = \text{PRF}^{\text{claim}}_{claimSk}(\text{"entry"} \| \text{epochId} \| rc_{\text{ent}})$</td>
+      <td class="gloss">The published claim nullifier is the <b>canonical PRF output</b>. Combined with $\mathcal{N}^{\text{claim,ent}}[V]$ membership check on-chain, enforces single-use.</td>
+    </tr>
+    <tr>
+      <td><b>C7</b></td>
+      <td>$s = \lfloor x \cdot S_{\text{out}} / A_{\text{in}} \rfloor$</td>
+      <td class="gloss">Allocation is <b>exactly the pro-rata floor</b>. Alice has <span class="warn">no freedom to inflate</span>; $x$ is bound by $rc_{\text{ent}}$ via $R_{\text{ent}}$, $A_{\text{in}}/S_{\text{out}}$ are public epoch values.</td>
+    </tr>
+    <tr>
+      <td><b>C8</b></td>
+      <td style="font-size:0.85em">$cm_{\text{share,out}} = \text{NoteCommit}(\text{"share"} \| \text{vaultId} \| s \| pk_d^{\text{user}} \| \rho_s \| rcm_s)$</td>
+      <td class="gloss">The new share-note commitment is well-formed and binds $s$ to Alice's <b>chosen recipient address</b>.</td>
+    </tr>
+    </tbody>
+  </table>
+  <div class="frame" style="margin-top:10px">
+    <h3>Alice's <b>only</b> degree of freedom at claim time</h3>
+    <p>The diversified address $pk_d^{\text{user}}$. Everything else (allocation $s$, claim nullifier, output commitment) is <span class="accent2">determined</span> by $R_{\text{ent}}$ and the epoch's public record. The output randomness $(\rho_s, rcm_s)$ is fresh but value-irrelevant,it just randomizes the new commitment.</p>
+    <p class="gloss">This freedom is <b>intentional</b>: it gives the new ShareNote unlinkability from Alice's prior on-chain addresses.</p>
+  </div>
+</section>
+
+<section>
+  <h2>On-chain claim &amp; epoch close</h2>
+  <div class="frame">
+<pre><code>PV[V].claimEntry(epochId, cnf_ent, cm_share_out, π_claim_ent):
+  1. require cnf_ent ∉ N_claim_ent[V]
+  2. require EntryEpoch[epochId].RCroot ≠ 0
+  3. fetch (vaultId, A_in, S_out, RCroot) from EntryEpoch[epochId]
+  4. require verify(π_claim_ent, public)
+  5. T_cm[V].insert(cm_share_out)
+  6. N_claim_ent[V].insert(cnf_ent)
+  7. emit ShareNoteCreated(cm_share_out)</code></pre>
+  </div>
+  <div class="two-col" style="margin-top:14px">
+    <div class="frame running">
+      <b>Alice's outcome:</b><br>
+      $cm_{\text{share,out}}$ inserted into $T_{cm}[V]$ at a fresh $pk_d^{\text{user}}$.<br>
+      $cnf_{\text{ent}}$ added to $\mathcal{N}^{\text{claim,ent}}[V]$.<br>
+      Alice now holds a $\text{ShareNote}(s = 2)$, spendable like any UserOwned note.
+    </div>
+    <div class="frame">
+      <h3>Aggregate share conservation</h3>
+      <p>$\displaystyle \sum_{i=1}^{m} s_i \le S_{\text{out}}$</p>
+      <p class="gloss">Each $s_i$ bound by C7 to the floor; summing $m$ floors can never exceed $S_{\text{out}}$. Contract doesn't need a running sum. Residual is dust held by $\text{PV}[V]$.</p>
+    </div>
+  </div>
+</section>
+
+<!-- =====================================================================
+     EXIT MIRROR
+     ===================================================================== -->
+
+<section>
+  <h2>Exit mirrors entry</h2>
+  <p>Same three phases. Same proof shape. Symbol mapping:</p>
+  <table>
+    <thead><tr><th>Entry side</th><th>Exit side</th></tr></thead>
+    <tbody>
+      <tr><td>Input: AssetNote in $T_{cm}[A]$</td><td>Input: ShareNote in $T_{cm}[V]$</td></tr>
+      <tr><td>Output intent: EntryIntentNote in $T_{cm}[A]$</td><td>Output intent: ExitIntentNote in $T_{cm}[V]$</td></tr>
+      <tr><td>Execution nullifier: $nf_{\text{ent}} \in \mathcal{N}[A]$</td><td>$nf_{\text{xit}} \in \mathcal{N}[V]$</td></tr>
+      <tr><td>Aggregate input: $A_{\text{in}} = \sum x_i$</td><td>$S_{\text{in}} = \sum s_j$</td></tr>
+      <tr><td>Aggregate output (post-snapshot): $S_{\text{out}}$</td><td>$A_{\text{out}}$</td></tr>
+      <tr><td>Allocation: $\lfloor x_i S_{\text{out}} / A_{\text{in}} \rfloor$</td><td>$\lfloor s_j A_{\text{out}} / S_{\text{in}} \rfloor$</td></tr>
+      <tr><td>Claim nullifier: $cnf_{\text{ent}} \in \mathcal{N}^{\text{claim,ent}}[V]$</td><td>$cnf_{\text{xit}} \in \mathcal{N}^{\text{claim,xit}}[A]$</td></tr>
+      <tr><td>Output of claim: ShareNote in $T_{cm}[V]$</td><td>AssetNote in $T_{cm}[A]$</td></tr>
+    </tbody>
+  </table>
+  <p class="gloss" style="margin-top:10px">One structural difference: $\text{PV}[V].\text{executeExit}$ calls $V.\text{redeem}(S_{\text{in}}, \text{receiver}=\text{SPP}[A], \text{owner}=\text{PV}[V])$, then notifies $\text{SPP}[A]$ via $\text{registerExitInflow}$. WETH lands in $\text{SPP}[A]$'s custody at execution; <b>no</b> AssetNote minted until claim.</p>
+</section>
+
+<!-- =====================================================================
+     REFUND, TRUST
+     ===================================================================== -->
+
+<section>
+  <h2>Refund &amp; liveness</h2>
+  <div class="frame">
+    <p>Every intent carries $(\text{refundPk},\, \text{expiry})$. After expiry, the holder of $\text{refundSk}$ can recover.</p>
+  </div>
+  <div class="two-col" style="margin-top:10px">
+    <div class="frame">
+      <h3>Mutual exclusion via shared $nf$</h3>
+      <p>Execution and refund consume the <span class="accent">same</span> $nf_{\text{ent}}$ (or $nf_{\text{xit}}$).</p>
+      <ul>
+        <li>Whichever transaction is mined first writes the nullifier; the other reverts.</li>
+        <li>After expiry, execution circuit's constraint (e) rejects → only refund is live.</li>
+        <li>Aggregator can delay, but cannot strand past expiry.</li>
+      </ul>
+    </div>
+    <div class="frame">
+      <h3>If a race causes a revert</h3>
+      <p class="gloss">If Alice's refund reverts because execution landed first, her receipt is in <i>some</i> epoch's RCroot, so she switches to the claim path. Either way, no funds stuck.</p>
+      <h3 style="margin-top:14px">Wallet responsibility</h3>
+      <p class="gloss">Backup of $(R_{\text{ent}}, claimSk, refundSk, \rho, rcm)$ is wallet-local. Self-encrypted on-chain backup is an engineering option.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Circuit-enforced vs contract-enforced</h2>
+  <table>
+    <thead><tr><th>Property</th><th>Circuit</th><th>Contract</th></tr></thead>
+    <tbody>
+      <tr><td>Old note exists under recent anchor</td><td>Yes</td><td>$\text{anchor} \in \text{validRoots}$</td></tr>
+      <tr><td>User owns old UserOwned note</td><td>Yes</td><td><span class="muted">n/a</span></td></tr>
+      <tr><td>$\sum x_i = A_{\text{in}}$, $\sum s_j = S_{\text{in}}$</td><td>Yes</td><td>Public-input check</td></tr>
+      <tr><td>$\text{RCroot}$ matches selected receipts</td><td><b>Yes</b> (binding)</td><td>List emitted in calldata</td></tr>
+      <tr><td>Caller of privileged $\text{SPP}[A]$ fns is registered $\text{PV}$</td><td><span class="muted">n/a</span></td><td>$\text{registeredPVs}[\text{assetId}]$</td></tr>
+      <tr><td>Receiver of $V.\text{deposit}$ is $\text{PV}[V]$</td><td><span class="muted">n/a</span></td><td>$\text{SPP}[A]$ resolves via VaultRegistry; caller has no parameter</td></tr>
+      <tr><td>Shares actually received</td><td><span class="muted">n/a</span></td><td>Pre/post ERC-20 balance</td></tr>
+      <tr><td>Receipt double-claim</td><td>Yes (C6)</td><td>$\mathcal{N}^{\text{claim}}$ membership</td></tr>
+      <tr><td><b class="warn">Metadata privacy from the aggregator</b></td><td><b class="warn">No</b></td><td><span class="muted">n/a</span></td></tr>
+      <tr><td><b class="warn">MEV privacy of public vault call</b></td><td><b class="warn">No</b></td><td><span class="muted">n/a</span></td></tr>
+    </tbody>
+  </table>
+  <p class="gloss" style="margin-top:8px">The two <span class="warn">No</span> rows are the residual trust assumptions. Neither is fixable by changing only the circuit set.</p>
+</section>
+
+<!-- =====================================================================
+     CLOSE
+     ===================================================================== -->
+
+<section class="center">
+  <h2>Takeaways</h2>
+  <div class="frame" style="display:inline-block; text-align:left; max-width: 900px">
+    <ol>
+      <li><b>Architecture:</b> universal $\text{SPP}[A]$ for asset anonymity + per-vault $\text{PV}[V]$ for share custody. $V$ is unmodified.</li>
+      <li><b>The receipt:</b> $rc_{\text{ent}}$ is a hidden Poseidon commitment Alice keeps. It binds $x$ and $claimSk$ before the batch is even formed.</li>
+      <li><b>The soundness core:</b> constraint (g) binds $\text{RCroot}$ to <i>exactly</i> the receipts inside the consumed intents. The entire claim system rests on this clause.</li>
+      <li><b>The pro-rata bind:</b> C1+C2 (opening matches commitment, commitment is in the epoch's RCroot) + C7 (allocation is the floored pro-rata) leaves Alice exactly one degree of freedom: her diversified recipient address.</li>
+      <li><b>Residual trust:</b> honest-but-curious aggregator. It sees the plaintext of intents it batched. Threshold committees over the viewing keys can close this gap.</li>
+    </ol>
+  </div>
+  <p class="muted" style="margin-top:18px">Questions / where to push back?</p>
+  <aside class="notes">
+    Optional Q&A directions: how to evaluate (g) under blob-DA, why pre/post balance and not return value (V is untrusted economically), why MEV protection is out of scope, what changes under a threshold committee.
+  </aside>
+</section>
+
+</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+  // 1) Render mermaid diagrams BEFORE Reveal initializes, so it sees final slide sizes.
+  try {
+    if (window.mermaid) {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: "dark",
+        themeVariables: { fontSize: "18px", background: "transparent" },
+        securityLevel: "loose"
+      });
+      mermaid.run({ querySelector: ".mermaid" }).catch(function (e) {
+        console.warn("mermaid run failed:", e);
+      });
+    }
+  } catch (e) {
+    console.warn("mermaid init failed:", e);
+  }
+
+  // 2) Initialize Reveal,when loaded via <script> tag, Reveal is a global with .initialize().
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c/t',
+    transition: 'fade',
+    width: 1280,
+    height: 800,
+    margin: 0.04,
+    plugins: [ RevealNotes, RevealHighlight ]
+  }).then(function () {
+    // 3) KaTeX auto-render after Reveal lays out slides.
+    if (window.renderMathInElement) {
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "\\[", right: "\\]", display: true},
+          {left: "$",  right: "$",  display: false},
+          {left: "\\(", right: "\\)", display: false}
+        ],
+        throwOnError: false
+      });
+    }
+  }).catch(function (e) {
+    console.error("Reveal init failed:", e);
+  });
+</script>
+</body>
+</html>
