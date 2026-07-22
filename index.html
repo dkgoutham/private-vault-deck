@@ -60,13 +60,240 @@
      ===================================================================== -->
 
 <section class="center">
-  <h1>Privacy Vault</h1>
-  <h2 class="muted">A privacy layer over unmodified ERC-4626 vaults</h2>
-  <p style="margin-top:36px"><span class="pill">deep dive</span></p>
-  <p class="muted" style="margin-top:24px">Universal shielded pool $\text{SPP}[A]$ &nbsp;+&nbsp; per-vault private vault $\text{PV}[V]$<br>Running example throughout: <span class="accent">WETH → ERC-4626 vault $V$</span></p>
+  <h1>Private Vaults</h1>
+  <h2 class="muted">Institutional privacy for ERC-4626 vaults. <span class="accent">No vault changes.</span></h2>
+  <p style="margin-top:30px"><span class="pill">mechanics deep dive</span></p>
+  <p class="muted" style="margin-top:22px; font-size:0.9em">
+    A depositor puts assets into a public yield vault without revealing who they are,<br>
+    how much they put in, or what the position is worth, while the vault itself<br>
+    keeps running as a plain, fully auditable ERC-4626 contract.
+  </p>
+  <p class="muted" style="margin-top:20px; font-size:0.8em">Running example throughout: <span class="accent">WETH → ERC-4626 vault $V$</span> &nbsp;·&nbsp; Nethermind Research</p>
   <aside class="notes">
-    20–25 min target. We will spend ~12-14 min on the entry protocol. The exit protocol is a 2-min mirror.
-    Start by stating the thesis: separating user intent from aggregate vault flow, while keeping V untouched.
+    20–25 min target. First ~5 min is problem + vocabulary; ~12-14 min on the entry protocol; the exit protocol is a 2-min mirror.
+    Do not use PP / PV / intent / receipt before the vocabulary slide.
+  </aside>
+</section>
+
+<!-- ---------------------------------------------------------------------
+     PROBLEM  →  HYPOTHESIS  →  PLAIN-ENGLISH PICTURE  →  VOCABULARY
+     (everything here is jargon-free; no protocol symbols yet)
+     --------------------------------------------------------------------- -->
+
+<section>
+  <h2>The problem: a vault deposit is a public disclosure</h2>
+  <p>DeFi vaults (Morpho, Yearn, Euler) are transparent by design. When an institution deposits into one, all of the following becomes permanently visible to anyone:</p>
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px">
+    <div class="frame">
+      <h3>Wallet identity</h3>
+      <p class="gloss" style="margin:2px 0">Linked by chain analysis back to the controlling entity.</p>
+    </div>
+    <div class="frame">
+      <h3>Exact deposit amount</h3>
+      <p class="gloss" style="margin:2px 0">Down to the wei, permanently, from the moment of the transaction.</p>
+    </div>
+    <div class="frame">
+      <h3>Live position value</h3>
+      <p class="gloss" style="margin:2px 0">Share balance × public NAV, queryable in real time by anyone.</p>
+    </div>
+    <div class="frame">
+      <h3>Yield earned</h3>
+      <p class="gloss" style="margin:2px 0">Exit amount minus entry amount, computed exactly.</p>
+    </div>
+    <div class="frame" style="grid-column: span 2">
+      <h3>Exit timing</h3>
+      <p class="gloss" style="margin:2px 0">When they withdrew, how much came back, and how that correlates with everything else they did on-chain.</p>
+    </div>
+  </div>
+  <p class="gloss" style="margin-top:14px">Depositing publicly exposes strategy, directional signals and portfolio composition to every competitor and analyst on-chain. <span class="accent">Compliance teams block it before it reaches a risk committee.</span> Capital that wants the yield and trusts the protocol simply doesn't enter.</p>
+  <aside class="notes">
+    This is the commercial framing. Lead with it even for a technical audience: it explains why the design makes the trade-offs it does.
+  </aside>
+</section>
+
+<section>
+  <h2>What an analyst reconstructs from a vanilla ERC-4626 deposit</h2>
+  <table>
+    <thead><tr><th>From a single public address, no special access</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td><code>approve</code> + <code>deposit(amount, recipient=0xA)</code></td><td>Exact deposit amount &amp; timing, to the block</td></tr>
+      <tr><td><code>Deposit</code> event, shares minted to <code>0xA</code></td><td>Permanent indexer-tagged position (Etherscan, Dune, Nansen)</td></tr>
+      <tr><td><code>vault.balanceOf(0xA)</code> &times; public NAV</td><td>Continuous real-time value of the position</td></tr>
+      <tr><td><code>redeem</code> + <code>transfer</code> to <code>0xA</code></td><td>Exit timing, exit amount, exact yield = exit − entry</td></tr>
+      <tr><td>Cross-protocol joins on the same EOA</td><td>Lifetime DeFi profile: every position ever held, joined</td></tr>
+    </tbody>
+  </table>
+  <p class="gloss" style="margin-top:14px">The position itself is the exposed surface. Privacy isn't an oversight in ERC-4626; it's simply not in scope for the standard.</p>
+  <div class="frame" style="margin-top:12px">
+    <h3>The three things institutions do instead, all unsatisfying</h3>
+    <ul style="margin:6px 0; padding-left:1.4em; font-size:0.9em">
+      <li><b>Don't deposit.</b> Keep the strategy off-chain, forgo the yield.</li>
+      <li><b>Hop wallets.</b> Fresh EOA per position: operationally painful, and chain analysis relinks it via timing and amounts anyway.</li>
+      <li><b>Use a permissioned shielded chain</b> (Aztec, Penumbra, a privacy L2). Gains privacy, loses access to the L1 vault ecosystem.</li>
+    </ul>
+    <p class="gloss" style="margin:6px 0 0">None of these is <i>"deposit into the vault you actually want, privately."</i> That's the gap.</p>
+  </div>
+  <aside class="notes">
+    Skip quickly if the reviewer says "I get the problem", reclaim the minute for the entry protocol.
+  </aside>
+</section>
+
+<section>
+  <h2>The hypothesis we want to test</h2>
+  <div class="frame" style="padding:18px 20px">
+    <p style="margin:0; font-size:1.12em; line-height:1.5">
+      Institutional capital is sitting out of DeFi vaults <b>not because of yield and not because of trust</b>, but because of transparency. Remove the transparency blocker, <span class="accent">without changing the underlying vault</span>, and TVL grows from depositors who currently cannot participate at all.
+    </p>
+  </div>
+  <div class="frame" style="margin-top:14px">
+    <p style="margin:0"><b>$180B+</b> of institutional capital sits on public chains today. Near-zero is deployed into DeFi vaults. The yield differential doesn't explain the gap. Transparency does.</p>
+  </div>
+  <div class="two-col" style="margin-top:16px">
+    <div class="frame">
+      <h3>What this design refuses to give up</h3>
+      <ul style="margin:6px 0; padding-left:1.4em; font-size:0.9em">
+        <li>The vault stays an <b>unmodified</b> ERC-4626 contract: no fork, no wrapper, no upgrade.</li>
+        <li>The vault's own accounting stays <b>fully public and auditable</b>.</li>
+        <li>Yield keeps accruing exactly as it does today.</li>
+      </ul>
+    </div>
+    <div class="frame">
+      <h3>What it changes</h3>
+      <ul style="margin:6px 0; padding-left:1.4em; font-size:0.9em">
+        <li>Individual depositors become invisible to the chain and to the vault.</li>
+        <li>The vault sees one counterparty making one aggregate deposit.</li>
+        <li>Disclosure becomes a <b>choice</b> the depositor makes, not a default.</li>
+      </ul>
+    </div>
+  </div>
+  <aside class="notes">
+    This slide is why the project exists. Everything after it is the how. If the audience disagrees with the hypothesis, the mechanics don't matter.
+  </aside>
+</section>
+
+<!-- =====================================================================
+     PLAIN-ENGLISH OVERVIEW  (first appearance of the two contracts)
+     ===================================================================== -->
+
+<section>
+  <h2>How it works, in one picture</h2>
+  <p style="margin:0 0 6px">A privacy layer sits <b>between</b> the depositor and the vault. Two contracts do the work.</p>
+  <div style="display:flex; justify-content:center; margin-top:6px">
+    <svg viewBox="0 0 1120 250" style="width:100%; max-width:1080px; height:auto" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ovArrow" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,-5 L10,0 L0,5" fill="#ffd166"/>
+        </marker>
+        <marker id="ovArrowMuted" viewBox="0 -5 10 10" refX="9" refY="0" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,-5 L10,0 L0,5" fill="#9aa0a6"/>
+        </marker>
+      </defs>
+
+      <!-- User -->
+      <rect x="8" y="52" width="150" height="86" rx="10" fill="#0d0d0d" stroke="#9aa0a6" stroke-width="2"/>
+      <text x="83" y="88" text-anchor="middle" fill="#ffffff" font-size="16" font-family="sans-serif">Depositor</text>
+      <text x="83" y="110" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">holds private notes</text>
+
+      <!-- Privacy pool -->
+      <rect x="238" y="22" width="266" height="146" rx="10" fill="#0d0d0d" stroke="#ffd166" stroke-width="2"/>
+      <text x="371" y="48" text-anchor="middle" fill="#ffd166" font-size="17" font-family="sans-serif" font-weight="600">Privacy Pool · PP[A]</text>
+      <text x="371" y="68" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">one per underlying asset (e.g. WETH)</text>
+      <rect x="258" y="82" width="226" height="70" rx="8" fill="#161616" stroke="#3a3a3a" stroke-width="1"/>
+      <text x="371" y="104" text-anchor="middle" fill="#e0e0e0" font-size="13" font-family="sans-serif">Aggregator</text>
+      <text x="371" y="122" text-anchor="middle" fill="#9aa0a6" font-size="11" font-family="sans-serif">reads + decrypts pending requests</text>
+      <text x="371" y="138" text-anchor="middle" fill="#9aa0a6" font-size="11" font-family="sans-serif">batches them · builds one ZK proof</text>
+
+      <!-- Private vault -->
+      <rect x="586" y="52" width="216" height="116" rx="10" fill="#0d0d0d" stroke="#ffd166" stroke-width="2"/>
+      <text x="694" y="80" text-anchor="middle" fill="#ffd166" font-size="17" font-family="sans-serif" font-weight="600">Private Vault · PV[V]</text>
+      <text x="694" y="100" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">one per public vault</text>
+      <text x="694" y="118" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">verifies every ZK proof</text>
+      <text x="694" y="136" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">holds the vault's shares</text>
+
+      <!-- Public vault -->
+      <rect x="884" y="52" width="228" height="116" rx="10" fill="#0d0d0d" stroke="#06d6a0" stroke-width="2"/>
+      <text x="998" y="82" text-anchor="middle" fill="#06d6a0" font-size="17" font-family="sans-serif" font-weight="600">Public Vault V</text>
+      <text x="998" y="104" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">standard ERC-4626</text>
+      <text x="998" y="122" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">Morpho / Yearn / Euler</text>
+      <text x="998" y="142" text-anchor="middle" fill="#06d6a0" font-size="12" font-family="sans-serif" font-style="italic">unchanged</text>
+
+      <!-- arrows -->
+      <line x1="160" y1="95" x2="232" y2="95" stroke="#ffd166" stroke-width="2" marker-end="url(#ovArrow)"/>
+      <text x="196" y="80" text-anchor="middle" fill="#9aa0a6" font-size="11" font-family="sans-serif">encrypted</text>
+      <text x="196" y="92" text-anchor="middle" fill="#9aa0a6" font-size="11" font-family="sans-serif">request</text>
+
+      <line x1="506" y1="95" x2="580" y2="95" stroke="#ffd166" stroke-width="2" marker-end="url(#ovArrow)"/>
+      <text x="543" y="80" text-anchor="middle" fill="#9aa0a6" font-size="11" font-family="sans-serif">ZK proof</text>
+      <text x="543" y="92" text-anchor="middle" fill="#9aa0a6" font-size="11" font-family="sans-serif">+ batch</text>
+
+      <line x1="804" y1="95" x2="878" y2="95" stroke="#ffd166" stroke-width="2" marker-end="url(#ovArrow)"/>
+      <text x="841" y="80" text-anchor="middle" fill="#9aa0a6" font-size="11" font-family="sans-serif">one aggregate</text>
+      <text x="841" y="92" text-anchor="middle" fill="#9aa0a6" font-size="11" font-family="sans-serif">deposit()</text>
+
+      <!-- claim return path -->
+      <path d="M 694,170 L 694,212 L 83,212 L 83,142" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="6,5" fill="none" marker-end="url(#ovArrowMuted)"/>
+      <text x="390" y="230" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif" font-style="italic">later: depositor privately claims their share of the position</text>
+    </svg>
+  </div>
+  <p class="gloss" style="margin-top:6px"><b>The vault sees exactly one thing:</b> a single standard ERC-4626 deposit from one contract address, for an aggregate amount. It never sees individual users, individual amounts, or identities. Withdrawal runs the same machinery in reverse.</p>
+  <aside class="notes">
+    First time PP[A] and PV[V] appear. Say the names out loud here and then use them consistently. "A" is the underlying asset; "V" is the public vault; the bracket just means "one instance per".
+  </aside>
+</section>
+
+<section>
+  <h2>The three phases, in plain English</h2>
+  <p>Both depositing and withdrawing run the same three-step shape. Only the direction changes.</p>
+  <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-top:16px">
+    <div class="frame">
+      <p class="muted" style="font-size:1.5em; margin:0 0 4px">01</p>
+      <h3>Intent</h3>
+      <p style="font-size:0.9em; margin:6px 0">The depositor privately says <i>"I want to put this much into that vault"</i>. The request is recorded on-chain as an opaque commitment and encrypted so only an aggregator can read it.</p>
+      <p class="gloss" style="margin:6px 0">They keep an off-chain <b>receipt</b>: their private claim ticket.</p>
+    </div>
+    <div class="frame">
+      <p class="muted" style="font-size:1.5em; margin:0 0 4px">02</p>
+      <h3>Execution</h3>
+      <p style="font-size:0.9em; margin:6px 0">An aggregator collects many pending requests, decrypts them, sums them, and submits <b>one</b> ZK proof plus <b>one</b> aggregate deposit into the public vault.</p>
+      <p class="gloss" style="margin:6px 0">The proof convinces the chain the total is honest without revealing any individual request.</p>
+    </div>
+    <div class="frame">
+      <p class="muted" style="font-size:1.5em; margin:0 0 4px">03</p>
+      <h3>Claim</h3>
+      <p style="font-size:0.9em; margin:6px 0">Each depositor proves their receipt was included in that batch and claims a <b>proportional</b> private share of the position.</p>
+      <p class="gloss" style="margin:6px 0">The share is issued to a fresh address with no link to their original wallet.</p>
+    </div>
+  </div>
+  <div class="frame" style="margin-top:16px">
+    <p style="margin:0"><b>Why three phases and not one?</b> Phase 1 buys <span class="accent">user privacy</span>: the request is unlinkable to the vault call. Phase 2 buys <span class="accent">aggregate correctness</span>: the chain can check the total without seeing the parts. Phase 3 buys <span class="accent">per-user fairness</span>: everyone gets exactly their pro-rata slice and nobody can take someone else's.</p>
+  </div>
+  <aside class="notes">
+    If someone only remembers one slide, it should be this one. Every later slide maps onto one of these three boxes.
+  </aside>
+</section>
+
+<section>
+  <h2>Vocabulary: everything else is built from these</h2>
+  <p style="margin:0 0 10px">Ten terms. They recur on every slide from here on.</p>
+  <div class="two-col">
+    <table>
+      <tr><td class="accent"><b>Note</b></td><td>A private IOU held in the depositor's wallet: "this address owns this amount". Only a hash of it is ever on-chain.</td></tr>
+      <tr><td class="accent"><b>Privacy pool</b></td><td>The contract that custodies real assets and tracks notes. Conceptually Zcash's shielded pool: balances go in, movements inside are invisible from outside.</td></tr>
+      <tr><td class="accent"><b>$\text{PP}[A]$</b></td><td><b>P</b>rivacy <b>P</b>ool for underlying <b>asset</b> $A$, one per asset, e.g. $\text{PP}[\text{WETH}]$. Where private WETH lives.</td></tr>
+      <tr><td class="accent"><b>$\text{PV}[V]$</b></td><td>Private vault for public <b>vault</b> $V$, one per vault. Holds $V$'s ERC-4626 shares and verifies every proof.</td></tr>
+      <tr><td class="accent"><b>Anonymity set</b></td><td>The crowd a depositor hides in. Bigger set = weaker inference from any single observation. One pool per asset keeps the crowd large.</td></tr>
+    </table>
+    <table>
+      <tr><td class="accent"><b>Intent</b></td><td>A note that says "this much, into that vault" and <i>cannot</i> be spent normally, only consumed by a batch execution or refunded after expiry.</td></tr>
+      <tr><td class="accent"><b>Receipt</b></td><td>The depositor's private claim ticket for one intent. Binds the amount and a secret without revealing either.</td></tr>
+      <tr><td class="accent"><b>Epoch / batch</b></td><td>One batched execution. Records the totals that went in and out, plus a fingerprint of every receipt it included.</td></tr>
+      <tr><td class="accent"><b>Relayer</b></td><td>Pays gas and submits the user's pre-built transaction. Sees only opaque bytes. Anyone can run one.</td></tr>
+      <tr><td class="accent"><b>Aggregator</b></td><td>A relayer that additionally holds a <b>viewing key</b>: it can <i>read</i> pending requests to batch them, but can never <i>move</i> anyone's funds.</td></tr>
+    </table>
+  </div>
+  <p class="gloss" style="margin-top:12px">Bracket notation is just indexing: $\text{PP}[\text{WETH}]$ is "the privacy pool instance for WETH", $\text{PV}[V]$ is "the private vault instance for vault $V$". Full symbol table on a later slide.</p>
+  <aside class="notes">
+    Don't read this out. Put it up, name the four that matter (note, intent, receipt, aggregator), and move on. It exists so nobody is lost later.
   </aside>
 </section>
 
@@ -82,8 +309,8 @@
     <div class="frame">
       <h3>Public, by design</h3>
       <ul style="margin:6px 0; padding-left:1.4em">
-        <li>Aggregate flow between $\text{SPP}[A]$, $\text{PV}[V]$, and $V$</li>
-        <li>Each epoch's totals $A_{\text{in}}, S_{\text{out}}, S_{\text{in}}, A_{\text{out}}$</li>
+        <li>Aggregate flow between $\text{PP}[A]$, $\text{PV}[V]$, and $V$</li>
+        <li>Each epoch's totals: assets in, shares out, shares in, assets out</li>
         <li>Public vault $V$ stays fully auditable</li>
       </ul>
     </div>
@@ -98,25 +325,7 @@
   </div>
   <p class="gloss" style="margin-top:14px"><b>The boundary:</b> user activity private, vault-aggregate activity public. A public observer can audit the four epoch totals but cannot map them back to individual users.</p>
   <aside class="notes">
-    State the destination before the problem. Researcher should leave this slide with the exact privacy claim in mind. Everything that follows is the "how"; this is the "what."
-  </aside>
-</section>
-
-<section>
-  <h2>What an analyst reconstructs from a vanilla ERC-4626 deposit</h2>
-  <table>
-    <thead><tr><th>From a single public address, no special access</th><th>Result</th></tr></thead>
-    <tbody>
-      <tr><td>`approve` + `deposit(amount, recipient=0xA)`</td><td>Exact deposit amount &amp; timing, to the block</td></tr>
-      <tr><td>`mint shares` event</td><td>Permanent indexer-tagged position (Etherscan, Dune, Nansen)</td></tr>
-      <tr><td>`vault.balanceOf(0xA)` &times; public NAV</td><td>Continuous real-time USD value of the position</td></tr>
-      <tr><td>`redeem` + `transfer` to `0xA`</td><td>Exit timing, exit amount, exact yield = exit − entry</td></tr>
-      <tr><td>Cross-protocol joins on the same EOA</td><td>Lifetime DeFi profile: every position ever, joined</td></tr>
-    </tbody>
-  </table>
-  <p class="gloss" style="margin-top:14px">The position itself is the exposed surface. Privacy isn't an oversight in ERC-4626, it's not in scope for the standard. Today institutions either <span class="accent">don't deposit</span>, <span class="accent">hop wallets</span> (linkable by timing), or <span class="accent">use a permissioned shielded chain</span> (loses access to L1 vault ecosystem). None of those is "deposit into the vault you want, privately."</p>
-  <aside class="notes">
-    Set the stakes for institutional users. Skip if reviewer pushes "I get the problem", reclaim 1 min for the entry protocol.
+    Now that the vocabulary is in place, this is the precise claim. Everything that follows is the "how"; this is the "what."
   </aside>
 </section>
 
@@ -126,10 +335,10 @@
 
 <section>
   <h2>Two privacy layers, one architecture</h2>
-  <p>The system has two separate privacy domains, plus the unmodified public vault.</p>
+  <p>Zooming into the two boxes from the picture: they are separate privacy domains, and the split is deliberate.</p>
   <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-top: 18px">
     <div class="frame">
-      <h3>$\text{SPP}[A]$, the asset pool</h3>
+      <h3>$\text{PP}[A]$, the asset pool</h3>
       <p style="font-size:0.9em">One pool per <span class="accent">underlying asset</span> $A$. Holds asset custody. Provides the big anonymity set for private deposits in $A$.</p>
     </div>
     <div class="frame">
@@ -138,10 +347,10 @@
     </div>
     <div class="frame">
       <h3>$V$, the public vault</h3>
-      <p style="font-size:0.9em">Plain ERC-4626, untouched. Sees only aggregate calls from $\text{SPP}[A]$ and $\text{PV}[V]$. No notion of users.</p>
+      <p style="font-size:0.9em">Plain ERC-4626, untouched. Sees only aggregate calls from $\text{PP}[A]$ and $\text{PV}[V]$. No notion of users.</p>
     </div>
   </div>
-  <p class="gloss" style="margin-top:18px">Anonymity-set-per-asset (not per-vault) is why $\text{SPP}[A]$ is separated from $\text{PV}[V]$. If each vault had its own asset pool, the anonymity set would fragment across vaults; with a universal $\text{SPP}[A]$, all WETH depositors share one set regardless of which vault they ultimately enter.</p>
+  <p class="gloss" style="margin-top:18px">Anonymity-set-per-asset (not per-vault) is why $\text{PP}[A]$ is separated from $\text{PV}[V]$. If each vault had its own asset pool, the anonymity set would fragment across vaults; with a universal $\text{PP}[A]$, all WETH depositors share one set regardless of which vault they ultimately enter.</p>
   <aside class="notes">
     The diagram of the call graph is on the next slide. Use this slide to set up the three roles, then pivot to the diagram.
   </aside>
@@ -172,7 +381,7 @@
 
       <!-- Middle row: contracts -->
       <rect x="80" y="220" width="220" height="64" rx="10" fill="#0d0d0d" stroke="#ffd166" stroke-width="2"/>
-      <text x="190" y="258" text-anchor="middle" fill="#ffd166" font-size="20" font-family="sans-serif" font-weight="600">SPP[A]</text>
+      <text x="190" y="258" text-anchor="middle" fill="#ffd166" font-size="20" font-family="sans-serif" font-weight="600">PP[A]</text>
 
       <rect x="620" y="220" width="220" height="64" rx="10" fill="#0d0d0d" stroke="#ffd166" stroke-width="2"/>
       <text x="730" y="258" text-anchor="middle" fill="#ffd166" font-size="20" font-family="sans-serif" font-weight="600">PV[V]</text>
@@ -185,13 +394,13 @@
       <line x1="184" y1="60" x2="416" y2="60" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="6,5" marker-end="url(#arrowEnd)"/>
       <text x="300" y="48" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif" font-style="italic">signed tx</text>
 
-      <!-- Relayer -> SPP (solid) -->
+      <!-- Relayer -> PP (solid) -->
       <line x1="430" y1="98" x2="240" y2="218" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
 
       <!-- Relayer -> PV (solid) -->
       <line x1="490" y1="98" x2="680" y2="218" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
 
-      <!-- Aggregator -> SPP (off-chain dotted, reads) -->
+      <!-- Aggregator -> PP (off-chain dotted, reads) -->
       <path d="M 740,95 Q 480,150 250,220" stroke="#9aa0a6" stroke-width="2" stroke-dasharray="6,5" fill="none" marker-end="url(#arrowEnd)"/>
       <text x="500" y="148" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif" font-style="italic">reads events</text>
 
@@ -199,11 +408,11 @@
       <line x1="780" y1="110" x2="760" y2="218" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
       <text x="828" y="170" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">execute</text>
 
-      <!-- PV -> SPP (solid horizontal back) -->
+      <!-- PV -> PP (solid horizontal back) -->
       <line x1="618" y1="252" x2="302" y2="252" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
       <text x="460" y="244" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">deposit / exit</text>
 
-      <!-- SPP -> V (solid down) -->
+      <!-- PP -> V (solid down) -->
       <line x1="220" y1="286" x2="395" y2="370" stroke="#9aa0a6" stroke-width="2" marker-end="url(#arrowEnd)"/>
       <text x="270" y="350" text-anchor="middle" fill="#9aa0a6" font-size="12" font-family="sans-serif">V.deposit</text>
 
@@ -217,21 +426,21 @@
       <h3>Off-chain (dotted)</h3>
       <ul style="margin:4px 0; padding-left:1.2em">
         <li>User &rarr; Relayer: signed transaction</li>
-        <li>Aggregator &rarr; SPP[A], PV[V]: reads on-chain events to discover pending user requests</li>
+        <li>Aggregator &rarr; PP[A], PV[V]: reads on-chain events to discover pending user requests</li>
       </ul>
     </div>
     <div class="frame">
       <h3>On-chain (solid)</h3>
       <ul style="margin:4px 0; padding-left:1.2em">
-        <li>Relayer &rarr; SPP[A], PV[V]: user-side calls (spendAsset, claimEntry, ...)</li>
+        <li>Relayer &rarr; PP[A], PV[V]: user-side calls (spendAsset, claimEntry, ...)</li>
         <li>Aggregator &rarr; PV[V]: executeEntry, executeExit</li>
-        <li>PV[V] &rarr; SPP[A]: depositToVault, registerExitInflow</li>
-        <li>SPP[A] &rarr; V: V.deposit&nbsp;&nbsp;&nbsp;PV[V] &rarr; V: V.redeem</li>
+        <li>PV[V] &rarr; PP[A]: depositToVault, registerExitInflow</li>
+        <li>PP[A] &rarr; V: V.deposit&nbsp;&nbsp;&nbsp;PV[V] &rarr; V: V.redeem</li>
       </ul>
     </div>
   </div>
   <aside class="notes">
-    The encrypted intent plaintexts go on-chain as calldata of spendAsset / spendShare. Aggregators don't receive them out-of-band, they read events from SPP[A] (entry intents) and PV[V] (exit intents) and try to decrypt with their viewing key. That's why the dotted lines go from Aggregator to the contracts, not from User to Aggregator.
+    The encrypted intent plaintexts go on-chain as calldata of spendAsset / spendShare. Aggregators don't receive them out-of-band, they read events from PP[A] (entry intents) and PV[V] (exit intents) and try to decrypt with their viewing key. That's why the dotted lines go from Aggregator to the contracts, not from User to Aggregator.
   </aside>
 </section>
 
@@ -264,7 +473,7 @@
     </div>
     <div class="frame">
       <h3>Trees and anchors</h3>
-      <p style="font-size:0.88em; margin:10px 0"><b>Commitment tree</b> $T_{cm}$: an incremental Merkle tree of every commitment ever inserted in a pool. $\text{SPP}[A]$ has $T_{cm}[A]$, $\text{PV}[V]$ has $T_{cm}[V]$.</p>
+      <p style="font-size:0.88em; margin:10px 0"><b>Commitment tree</b> $T_{cm}$: an incremental Merkle tree of every commitment ever inserted in a pool. $\text{PP}[A]$ has $T_{cm}[A]$, $\text{PV}[V]$ has $T_{cm}[V]$.</p>
       <p style="font-size:0.88em; margin:10px 0"><b>Anchor</b>: a recent root of $T_{cm}$. Every spend proof picks an anchor and proves Merkle membership against it.</p>
     </div>
   </div>
@@ -277,7 +486,7 @@
       </div>
       <div>
         <p style="font-size:0.88em; margin:8px 0"><b>Double-spend prevention</b>: each pool refuses to insert any $nf$ already in $\mathcal{N}$. Once a nullifier is in, the corresponding note is unspendable forever.</p>
-        <p style="font-size:0.88em; margin:8px 0">$\mathcal{N}[A]$ lives in $\text{SPP}[A]$; $\mathcal{N}[V]$ lives in $\text{PV}[V]$.</p>
+        <p style="font-size:0.88em; margin:8px 0">$\mathcal{N}[A]$ lives in $\text{PP}[A]$; $\mathcal{N}[V]$ lives in $\text{PV}[V]$.</p>
       </div>
     </div>
   </div>
@@ -374,7 +583,7 @@
       <h3 style="margin-top:12px">Trees and sets (per pool)</h3>
       <table>
         <tr><td>$cm$</td><td>note commitment (Pedersen hash of opening)</td></tr>
-        <tr><td>$T_{cm}[A], T_{cm}[V]$</td><td>commitment trees in $\text{SPP}[A]$ and $\text{PV}[V]$</td></tr>
+        <tr><td>$T_{cm}[A], T_{cm}[V]$</td><td>commitment trees in $\text{PP}[A]$ and $\text{PV}[V]$</td></tr>
         <tr><td>$nf$</td><td>spend nullifier; published on spend</td></tr>
         <tr><td>$\mathcal{N}[A], \mathcal{N}[V]$</td><td>nullifier sets, prevent double-spend</td></tr>
         <tr><td>$rc_{\text{ent}}, rc_{\text{xit}}$</td><td>receipt commitments (entry and exit)</td></tr>
@@ -392,22 +601,22 @@
 sequenceDiagram
     autonumber
     participant User
-    participant SPP
+    participant PP
     participant Aggregator
     participant PV
     participant V
 
     User->>User: build R_ent locally, keep rc_ent in wallet
-    User->>SPP: spendAsset (consume WETH note, create entry intent)
+    User->>PP: spendAsset (consume WETH note, create entry intent)
     Aggregator->>Aggregator: decrypt intents, batch m of them
     Aggregator->>PV: executeEntry (batch SNARK)
-    PV->>SPP: depositToVault (consume intent nullifiers)
-    SPP->>V: V.deposit(A_in, receiver=PV)
+    PV->>PP: depositToVault (consume intent nullifiers)
+    PP->>V: V.deposit(A_in, receiver=PV)
     V-->>PV: mint S_out aggregate shares
     User->>PV: claimEntry (rc_ent, MerklePath_rc)
     PV-->>User: fresh ShareNote at fresh diversified address
 </pre>
-  <p class="gloss">Reverse flow is symmetric: spendShare, then executeExit (V.redeem with receiver=$\text{SPP}[A]$), then claimExit producing a fresh AssetNote.</p>
+  <p class="gloss">Reverse flow is symmetric: spendShare, then executeExit (V.redeem with receiver=$\text{PP}[A]$), then claimExit producing a fresh AssetNote.</p>
 </section>
 
 <!-- =====================================================================
@@ -483,7 +692,7 @@ refundSk ←$  𝔽    refundPk = [refundSk]·B</code></pre>
 </section>
 
 <section>
-  <h2>On-chain: <code>SPP[A].spendAsset</code></h2>
+  <h2>On-chain: <code>PP[A].spendAsset</code></h2>
   <div class="frame">
 <pre><code>spendAsset(nf_old, cm_intent, cm_change?, π_spend, {(epk_j, C_j)}_{j=1..k}):
   1. require verify(π_spend, public)
@@ -504,7 +713,7 @@ refundSk ←$  𝔽    refundPk = [refundSk]·B</code></pre>
     <div class="frame">
       <h3>What aggregators do off-chain</h3>
       <ul>
-        <li>Each aggregator $j$ watches `IntentCreated`, attempts to decrypt $C_j$.</li>
+        <li>Each aggregator $j$ watches <code>IntentCreated</code>, attempts to decrypt $C_j$.</li>
         <li>On success: index the opening by $\text{vaultId}$.</li>
         <li>Wait until $m$ intents accumulate for some vault, then go to execution.</li>
       </ul>
@@ -520,7 +729,7 @@ refundSk ←$  𝔽    refundPk = [refundSk]·B</code></pre>
   <table style="margin-top:10px">
     <thead><tr><th>Mechanism</th><th>Effect</th></tr></thead>
     <tbody>
-      <tr><td>Each pool registers a <b>fixed verifier per entry point</b> (`spendAsset` vs `executeEntry` vs `refundEntry`).</td><td>Prover cannot pick the verifier.</td></tr>
+      <tr><td>Each pool registers a <b>fixed verifier per entry point</b> (<code>spendAsset</code> vs <code>executeEntry</code> vs <code>refundEntry</code>).</td><td>Prover cannot pick the verifier.</td></tr>
       <tr><td>Spend circuit constrains <b>output</b> $\text{authType}$ to match its destination role.</td><td>UserOwned for asset/share outputs; EntrySink/ExitSink for intent outputs.</td></tr>
       <tr><td>Execution circuit constrains <b>input</b> $\text{authType} = \text{EntrySink}$ / $\text{ExitSink}$.</td><td>UserOwned notes can't be fed to executor.</td></tr>
     </tbody>
@@ -632,7 +841,7 @@ PV[V].executeEntry(epochId, π_exec_ent, publicInputs):
   1. require publicInputs.currentEpoch == on-chain time source
   2. require verify(π_exec_ent, publicInputs)
   3. pre  = IERC20(V).balanceOf(address(this))      // share balance
-  4. SPP[A].depositToVault(vaultId, A_in, {nf_ent_i}, anchor)
+  4. PP[A].depositToVault(vaultId, A_in, {nf_ent_i}, anchor)
        └─ require msg.sender == registeredPVs[assetId]
        └─ require assetId == this.assetId
        └─ require anchor ∈ T_cm[A].validRoots
@@ -699,8 +908,8 @@ PV[V].executeEntry(epochId, π_exec_ent, publicInputs):
     <div>
       <h3>Discovery (off-chain)</h3>
       <ol>
-        <li>Watch `EntryEpochExecuted(epochId, vaultId, A_in, S_out, RCroot, m)`.</li>
-        <li>Read corresponding `EntryReceiptList(epochId, rc_list)`.</li>
+        <li>Watch <code>EntryEpochExecuted(epochId, vaultId, A_in, S_out, RCroot, m)</code>.</li>
+        <li>Read corresponding <code>EntryReceiptList(epochId, rc_list)</code>.</li>
         <li>Compute $rc_{\text{ent}}$ from her stored $R_{\text{ent}}$.</li>
         <li>Find index $i$ with $\text{rc\_list}[i] = rc_{\text{ent}}$.</li>
         <li>Build $\text{MerklePath}_{rc}$ from leaf $i$ to $\text{RCroot}$.</li>
@@ -837,7 +1046,7 @@ s = \left\lfloor \frac{x \cdot S_{\text{out}}}{A_{\text{in}}} \right\rfloor = \l
       <tr><td>Output of claim: ShareNote in $T_{cm}[V]$</td><td>AssetNote in $T_{cm}[A]$</td></tr>
     </tbody>
   </table>
-  <p class="gloss" style="margin-top:10px">One structural difference: $\text{PV}[V].\text{executeExit}$ calls $V.\text{redeem}(S_{\text{in}}, \text{receiver}=\text{SPP}[A], \text{owner}=\text{PV}[V])$, then notifies $\text{SPP}[A]$ via $\text{registerExitInflow}$. WETH lands in $\text{SPP}[A]$'s custody at execution; <b>no</b> AssetNote minted until claim.</p>
+  <p class="gloss" style="margin-top:10px">One structural difference: $\text{PV}[V].\text{executeExit}$ calls $V.\text{redeem}(S_{\text{in}}, \text{receiver}=\text{PP}[A], \text{owner}=\text{PV}[V])$, then notifies $\text{PP}[A]$ via $\text{registerExitInflow}$. WETH lands in $\text{PP}[A]$'s custody at execution; <b>no</b> AssetNote minted until claim.</p>
 </section>
 
 <!-- =====================================================================
@@ -869,6 +1078,31 @@ s = \left\lfloor \frac{x \cdot S_{\text{out}}}{A_{\text{in}}} \right\rfloor = \l
 </section>
 
 <section>
+  <h2>Compliance: disclosure as a choice, not a default</h2>
+  <p style="margin:0 0 10px">The model is built on <b>viewing keys and inclusion proofs</b>, not association sets, not proof-of-innocence.</p>
+  <div class="two-col">
+    <div class="frame">
+      <h3>Two keys per depositor</h3>
+      <ul style="margin:6px 0; padding-left:1.3em; font-size:0.9em">
+        <li><b>Spending key</b>: controls the assets. Never shared, with anyone.</li>
+        <li><b>Viewing key</b>: read-only view of that user's own history.</li>
+      </ul>
+      <p class="gloss" style="margin:8px 0 0">The viewing key is <b>selective disclosure</b>: the user decides who receives it and for what scope. Handing one to a regulator, an auditor or an LP reveals <i>only that user's</i> activity; every other participant in the pool is unaffected.</p>
+    </div>
+    <div class="frame">
+      <h3>What an audit actually gets</h3>
+      <p style="font-size:0.9em; margin:6px 0">Every execution writes an on-chain epoch record tied to a specific vault deposit or redemption, plus the full receipt list.</p>
+      <p style="font-size:0.9em; margin:6px 0">Viewing key + receipt openings + batch-inclusion proofs reconstruct a <b>complete, independently verifiable</b> record: every deposit, position and withdrawal, tied to the public vault transactions that settled them.</p>
+      <p class="gloss" style="margin:8px 0 0"><b>Seizure:</b> the spending key gives full asset control and can be compelled to transfer under an applicable court order, the same legal mechanism as any on-chain private key. Nothing here is a new escape hatch.</p>
+    </div>
+  </div>
+  <p class="gloss" style="margin-top:14px">The design deliberately avoids screening-based approaches: no one is asked to prove where their funds <i>didn't</i> come from, and no third party gets a blanket view of the pool. What gets disclosed, and to whom, stays the depositor's decision.</p>
+  <aside class="notes">
+    This is the first question every institutional counterparty asks. Be precise: selective disclosure is per-user and scoped; there is no global viewing key over the pool, and the aggregator's key reads pending intents only, not history.
+  </aside>
+</section>
+
+<section>
   <h2>Soundness summary</h2>
   <p style="margin:0 0 12px 0; font-size:0.92em">Three buckets. The first two compose the protocol's correctness; the third is residual trust.</p>
   <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px;">
@@ -887,7 +1121,7 @@ s = \left\lfloor \frac{x \cdot S_{\text{out}}}{A_{\text{in}}} \right\rfloor = \l
       <h3>Operational <span class="muted" style="font-size:0.7em">(contract)</span></h3>
       <ul style="font-size:0.78em; padding-left:1.1em; margin:6px 0">
         <li>$\text{anchor} \in \text{validRoots}$ check</li>
-        <li>Privileged $\text{SPP}[A]$ caller is in $\text{registeredPVs}[\text{assetId}]$</li>
+        <li>Privileged $\text{PP}[A]$ caller is in $\text{registeredPVs}[\text{assetId}]$</li>
         <li>Receivers of $V.\text{deposit} / V.\text{redeem}$ resolved by contract, not caller</li>
         <li>Realized $S_{\text{out}}, A_{\text{out}}$ measured by pre/post ERC-20 balance</li>
         <li>Reentrancy lock around the cross-contract execution path</li>
@@ -915,7 +1149,7 @@ s = \left\lfloor \frac{x \cdot S_{\text{out}}}{A_{\text{in}}} \right\rfloor = \l
   <h2>Takeaways</h2>
   <div class="frame" style="display:inline-block; text-align:left; max-width: 900px">
     <ol>
-      <li><b>Architecture:</b> universal $\text{SPP}[A]$ for asset anonymity + per-vault $\text{PV}[V]$ for share custody. $V$ is unmodified.</li>
+      <li><b>Architecture:</b> universal $\text{PP}[A]$ for asset anonymity + per-vault $\text{PV}[V]$ for share custody. $V$ is unmodified.</li>
       <li><b>The receipt:</b> $rc_{\text{ent}}$ is a hidden Poseidon commitment Alice keeps. It binds $x$ and $claimSk$ before the batch is even formed.</li>
       <li><b>The soundness core:</b> constraint (g) binds $\text{RCroot}$ to <i>exactly</i> the receipts inside the consumed intents. The entire claim system rests on this clause.</li>
       <li><b>The pro-rata bind:</b> C1+C2 (opening matches commitment, commitment is in the epoch's RCroot) + C7 (allocation is the floored pro-rata) leaves Alice exactly one degree of freedom: her diversified recipient address.</li>
@@ -925,6 +1159,50 @@ s = \left\lfloor \frac{x \cdot S_{\text{out}}}{A_{\text{in}}} \right\rfloor = \l
   <p class="muted" style="margin-top:18px">Questions / where to push back?</p>
   <aside class="notes">
     Optional Q&A directions: how to evaluate (g) under blob-DA, why pre/post balance and not return value (V is untrusted economically), why MEV protection is out of scope, what changes under a threshold committee.
+  </aside>
+</section>
+
+<section>
+  <h2>Status &amp; the test we want to run</h2>
+  <div class="two-col-3-2">
+    <div class="frame">
+      <h3>The experiment</h3>
+      <p style="margin:6px 0">A controlled test of whether transparency is the <i>actual</i> blocker keeping institutional capital out of DeFi vaults, rather than a story everyone repeats.</p>
+      <p style="margin:6px 0">We are looking for <b>one vault curator or protocol</b> willing to run it with us.</p>
+      <ul style="margin:8px 0; padding-left:1.3em; font-size:0.92em">
+        <li>The vault requires <span class="accent">no modifications</span>: it stays a standard ERC-4626 contract.</li>
+        <li>We handle the protocol side entirely: contracts, circuits, aggregator operation.</li>
+        <li>Success metric: TVL from depositors who would not otherwise have deposited.</li>
+      </ul>
+      <p class="gloss" style="margin:8px 0 0">If you have institutional depositors who have named privacy or transparency as their reason for not depositing, that's the conversation.</p>
+    </div>
+    <div class="stack">
+      <div class="frame">
+        <h3>Status</h3>
+        <ul style="margin:6px 0; padding-left:1.2em; font-size:0.9em">
+          <li>Architecture: <span class="accent2">designed and documented</span></li>
+          <li>ZK circuits: in development</li>
+          <li>Smart contracts: in development</li>
+          <li>Curator conversations: ongoing</li>
+          <li class="accent">Looking for one curator to run the pilot</li>
+        </ul>
+      </div>
+      <div class="frame">
+        <h3>Known open items (v2)</h3>
+        <ul style="margin:6px 0; padding-left:1.2em; font-size:0.86em">
+          <li>Threshold committee over aggregator viewing keys</li>
+          <li>Private orderflow for the aggregate vault call</li>
+          <li>Dust-sweep rule and permissionless vault registration</li>
+        </ul>
+      </div>
+      <div class="frame">
+        <h3>Get in touch</h3>
+        <p style="margin:4px 0; font-size:0.9em"><b>Swapnil Raj</b>, Head of Innovation, Nethermind<br><span class="key">swp@nethermind.io</span></p>
+      </div>
+    </div>
+  </div>
+  <aside class="notes">
+    Close on the ask, not on the cryptography. Even a research audience wants to know what happens next and what would falsify the hypothesis.
   </aside>
 </section>
 
